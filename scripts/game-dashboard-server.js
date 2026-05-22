@@ -482,6 +482,7 @@ function generateThumbnailTest(input = {}) {
     `--output=${thumbnailPath}`,
     `--metadata=${metadataPath}`,
     '--frame-strategy=early-highlight',
+    '--safe-crop=hud-safe',
     '--max-words=6',
     `--title=${options.title}`,
   ];
@@ -555,6 +556,7 @@ function startRender(options) {
     `--thumbnail=${options.thumbnail ? 'true' : 'false'}`,
     `--thumbnail-output=${thumbnail}`,
     '--thumbnail-frame-strategy=early-highlight',
+    '--thumbnail-safe-crop=hud-safe',
     '--thumbnail-max-words=6',
     `--port=${renderPort}`,
     `--url=${renderUrl}`,
