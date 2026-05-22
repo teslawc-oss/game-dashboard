@@ -275,7 +275,7 @@ function normalizeOptions(input = {}) {
   const requestedTypes = Array.isArray(input.obstacleTypes) ? input.obstacleTypes : [];
   const allowedTypes = new Set(OBSTACLE_TYPES.map((item) => item.value));
   const obstacleTypes = requestedTypes.filter((type) => allowedTypes.has(type));
-  const format = input.format === 'mp4' ? 'mp4' : 'webm';
+  const format = input.format === 'webm' ? 'webm' : 'mp4';
   const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 20)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const qualitySettings = {
@@ -825,7 +825,8 @@ function dashboardHtml() {
     .recording-actions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     .recording-actions button, .recording-actions a { font-size: 11px; padding: 7px 9px; min-height: 30px; }
     .thumb-preview { width: 100%; max-width: 360px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 14px; border: 1px solid rgba(255,255,255,.14); background: rgba(0,0,0,.35); margin-top: 8px; }
-    .title-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .title-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: end; }
+    .thumbnail-panel { border: 1px solid rgba(142,244,255,.28); border-radius: 14px; padding: 10px; background: rgba(142,244,255,.075); }
     a { color: var(--accent); text-decoration: none; }
     .muted { color: var(--muted); font-size: 12px; }
     .pill { display: inline-block; border: 1px solid rgba(255,255,255,.13); border-radius: 999px; padding: 4px 8px; color: #cad7ef; font-size: 11px; margin: 4px 4px 0 0; }
@@ -899,7 +900,7 @@ function dashboardHtml() {
           </div>
           <div>
             <label for="format">格式</label>
-            <select id="format" name="format"><option value="webm" selected>WebM</option><option value="mp4">MP4 + comparison WebM</option></select>
+            <select id="format" name="format"><option value="mp4" selected>MP4 + comparison WebM</option><option value="webm">WebM only</option></select>
           </div>
           <div>
             <label for="qualityPreset">畫質</label>
@@ -939,14 +940,16 @@ function dashboardHtml() {
             <select id="ttsVoice" name="ttsVoice">${ttsVoiceOptions}</select>
           </div>
           <label class="check"><input id="audio" name="audio" type="checkbox" checked> <span>遊戲音訊</span></label>
-          <label class="check"><input id="thumbnail" name="thumbnail" type="checkbox" checked> <span>YouTube thumbnail</span></label>
-          <div class="wide">
+          <label class="check thumbnail-toggle"><input id="thumbnail" name="thumbnail" type="checkbox" checked> <span>YouTube thumbnail 會自動生成</span></label>
+          <div class="wide thumbnail-panel" data-dashboard-section="thumbnail-controls">
             <label for="thumbnailTitle">Thumbnail 大字（約 6 字）</label>
             <div class="title-row">
               <input id="thumbnailTitle" name="thumbnailTitle" type="text" value="CRAZY FIRST HIT" maxlength="80" placeholder="例：CRAZY FIRST HIT" list="thumbnailTitlePresets">
               <button id="randomTitleBtn" class="secondary" type="button">Random</button>
+              <button id="testThumbnailBtn" class="secondary" type="button">Test latest thumbnail</button>
             </div>
             <datalist id="thumbnailTitlePresets">${thumbnailTitleOptions}</datalist>
+            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。</p>
           </div>
         </div>
 
@@ -1027,7 +1030,7 @@ const qualityPresetInput = document.querySelector('#qualityPreset');
 const lengthModeInput = document.querySelector('#lengthMode');
 const targetMinutesInput = document.querySelector('#targetMinutes');
 const trackLengthInput = document.querySelector('#trackLength');
-const thumbnailPresetTitles = ${JSON.stringify(THUMBNAIL_TITLE_PRESETS)};
+const dashboardThumbnailPresetTitles = ${JSON.stringify(THUMBNAIL_TITLE_PRESETS)};
 const recordModeHints = {
   single: 'Single: in-game recording only; use Marble Rush page for manual Single capture.',
   continuous: 'Multiple: background record repeated single races; 場數由 Multiple 場數控制。',
@@ -1081,9 +1084,10 @@ document.querySelector('#allTypes').onclick = () => setTypes(${JSON.stringify(OB
 document.querySelector('#bumperOnly').onclick = () => setTypes(['popBumper']);
 document.querySelector('#clearTypes').onclick = () => setTypes([]);
 const randomTitleBtn = document.querySelector('#randomTitleBtn');
+const testThumbnailBtn = document.querySelector('#testThumbnailBtn');
 if (randomTitleBtn) {
   randomTitleBtn.onclick = () => {
-    const title = thumbnailPresetTitles[Math.floor(Math.random() * thumbnailPresetTitles.length)] || 'CRAZY FIRST HIT';
+    const title = dashboardThumbnailPresetTitles[Math.floor(Math.random() * dashboardThumbnailPresetTitles.length)] || 'CRAZY FIRST HIT';
     if (form.thumbnailTitle) form.thumbnailTitle.value = title;
   };
 }
@@ -1158,6 +1162,7 @@ async function testGenerateThumbnail(videoName = '') {
 serverStartBtn.onclick = () => controlGameServer('start');
 serverStopBtn.onclick = () => controlGameServer('stop');
 serverRefreshBtn.onclick = refreshGameServer;
+if (testThumbnailBtn) testThumbnailBtn.onclick = () => testGenerateThumbnail('');
 function renderJob(job) {
   if (!job) { setStatus('idle'); if (progressBar) progressBar.style.width = '0%'; if (progressText) progressText.textContent = 'Progress 0%'; return; }
   setStatus(job.status);
