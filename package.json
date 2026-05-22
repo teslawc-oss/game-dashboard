@@ -1,0 +1,11 @@
+{
+  "name": "game-ops-dashboard",
+  "version": "0.1.0",
+  "description": "Standalone multi-game operations dashboard for local game servers and background renders.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/game-dashboard-server.js",
+    "dashboard": "node scripts/game-dashboard-server.js",
+    "check": "node --check scripts/game-dashboard-server.js"
+  }
+}

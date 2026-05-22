@@ -1,0 +1,30 @@
+{
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8888,
+    "renderPortStart": 4300
+  },
+  "games": [
+    {
+      "id": "marble-race",
+      "name": "Marble Rush",
+      "badge": "READY",
+      "runtime": "Vite",
+      "capability": "cup/video",
+      "projectRoot": "/Users/bert/marble-race",
+      "recordingsDir": "/Users/bert/marble-race/recordings",
+      "server": {
+        "host": "127.0.0.1",
+        "port": 5173,
+        "url": "http://127.0.0.1:5173",
+        "startCommand": "npm run dev -- --host 127.0.0.1 --port 5173"
+      },
+      "render": {
+        "command": "npm run render:auto-cup -- --no-build"
+      },
+      "thumbnail": {
+        "command": "node scripts/generate-youtube-thumbnail.js"
+      }
+    }
+  ]
+}
