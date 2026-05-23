@@ -174,14 +174,19 @@ const CUP_STAGE_TRACK_LENGTHS = {
   final: 600,
 };
 const CUP_STAGE_TRACK_LABEL = 'Cup unified 600m';
+const RACE_SECONDS_PER_METER = 90 / 300;
+function estimateMaxRaceSecondsForTrackLength(trackLength) {
+  return Math.max(45, Math.min(1200, Math.ceil(trackLength * RACE_SECONDS_PER_METER)));
+}
+
 const CUP_VIDEO_DEFAULTS = {
   targetSeconds: 600,
   targetMinutes: 10,
   trackLength: 600,
   stageTrackLengths: CUP_STAGE_TRACK_LENGTHS,
-  maxRaceSeconds: 240,
+  maxRaceSeconds: estimateMaxRaceSecondsForTrackLength(600),
   timeout: 1800,
-  label: 'Dashboard default supports target video duration or fixed per-race track length; cup stages use one unified track length',
+  label: 'Dashboard default supports target video duration or fixed per-race track length; max race seconds follows track length at 300m ≈ 90s',
 };
 
 const jobs = new Map();
@@ -291,8 +296,7 @@ function normalizeOptions(input = {}) {
   const trackLength = lengthMode === 'target-duration'
     ? calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRaceCount })
     : manualTrackLength;
-  const baseMaxRaceSeconds = Math.ceil((trackLength / 3.8) + 90);
-  const maxRaceSeconds = Math.max(45, Math.min(1200, Math.ceil(baseMaxRaceSeconds * 1.5)));
+  const maxRaceSeconds = estimateMaxRaceSecondsForTrackLength(trackLength);
   const width = Math.max(1280, Math.min(3840, Math.round(Number(input.width) || qualitySettings.width)));
   const height = Math.max(720, Math.min(2160, Math.round(Number(input.height) || qualitySettings.height)));
   const crf = Math.max(10, Math.min(24, Math.round(Number(input.crf) || qualitySettings.crf)));
@@ -1128,6 +1132,9 @@ function estimateDashboardTrackLength() {
   const raceSeconds = Math.max(35, (targetSeconds - nonRaceSeconds) / races);
   return Math.max(80, Math.min(3000, Math.round((raceSeconds * 4.6) / 10) * 10));
 }
+function estimateDashboardMaxRaceSeconds(trackLength) {
+  return Math.max(45, Math.min(1200, Math.ceil(trackLength * 0.3)));
+}
 function updateLengthModeState() {
   const auto = lengthModeInput?.value !== 'fixed-track';
   if (targetMinutesInput) targetMinutesInput.disabled = !auto;
@@ -1242,6 +1249,7 @@ function renderJob(job) {
     'Length mode: ' + (job.options.lengthMode === 'fixed-track' ? 'Fixed track' : 'Target duration'),
     'Target: ' + (job.options.targetMinutes || 10) + ' min',
     'Track: ' + (job.options.stageTrackLabel || (job.options.trackLength + 'm')),
+    'Max race: ' + (job.options.maxRaceSeconds || estimateDashboardMaxRaceSeconds(job.options.trackLength || 600)) + 's',
     'Density: ' + job.options.density,
     'Distribution: ' + (job.options.obstacleDistribution || 'random'),
     'Types: ' + (job.options.obstacleTypes.length ? job.options.obstacleTypes.join(', ') : 'all'),
