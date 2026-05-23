@@ -281,13 +281,14 @@ function normalizeOptions(input = {}) {
   const allowedTypes = new Set(OBSTACLE_TYPES.map((item) => item.value));
   const obstacleTypes = requestedTypes.filter((type) => allowedTypes.has(type));
   const format = input.format === 'webm' ? 'webm' : 'mp4';
+  const videoCapture = input.videoCapture === 'playwright' ? 'playwright' : 'canvas';
   const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 12)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const qualitySettings = {
-    '1080p-smooth': { width: 1920, height: 1080, crf: 14, captureScale: 1, fps: 60, videoPreset: 'slow', label: '1080p Smooth' },
-    '1080p': { width: 1920, height: 1080, crf: 14, captureScale: 1, fps: 60, videoPreset: 'slow', label: '1080p' },
-    '1440p': { width: 2560, height: 1440, crf: 14, captureScale: 1, fps: 60, videoPreset: 'slow', label: 'High 1440p' },
-    '4k': { width: 3840, height: 2160, crf: 16, captureScale: 1, fps: 60, videoPreset: 'slow', label: 'Ultra 4K' },
+    '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 45, videoPreset: 'veryfast', label: '1080p Smooth · 45fps · fast encode' },
+    '1080p': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 45, videoPreset: 'veryfast', label: '1080p · 45fps · fast encode' },
+    '1440p': { width: 2560, height: 1440, crf: 20, captureScale: 1, fps: 45, videoPreset: 'faster', label: 'High 1440p · 45fps · faster encode' },
+    '4k': { width: 3840, height: 2160, crf: 20, captureScale: 1, fps: 45, videoPreset: 'faster', label: 'Ultra 4K · 45fps · faster encode' },
   }[qualityPreset];
   const lengthMode = input.lengthMode === 'fixed-track' ? 'fixed-track' : 'target-duration';
   const targetMinutes = clampNumber(input.targetMinutes, 1, 120, CUP_VIDEO_DEFAULTS.targetMinutes);
@@ -303,7 +304,12 @@ function normalizeOptions(input = {}) {
   const captureScale = Math.max(1, Math.min(2, Number(input.captureScale) || qualitySettings.captureScale));
   const fps = Math.max(24, Math.min(120, Math.round(Number(input.fps) || qualitySettings.fps)));
   const videoPreset = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'].includes(input.videoPreset) ? input.videoPreset : qualitySettings.videoPreset;
-  const timeout = Math.max(120, Math.min(7200, Number(input.timeout) || Math.max(CUP_VIDEO_DEFAULTS.timeout, targetSeconds + 600)));
+  const raceCount = estimateRaceCount(recordMode, multipleRaceCount);
+  const dynamicTimeout = Math.ceil((maxRaceSeconds * raceCount) + estimateNonRaceSeconds(recordMode, raceCount) + 300);
+  const requestedTimeout = Number(input.timeout);
+  const timeout = Number.isFinite(requestedTimeout) && requestedTimeout > 0 && requestedTimeout !== CUP_VIDEO_DEFAULTS.timeout
+    ? Math.max(120, Math.min(7200, requestedTimeout))
+    : Math.max(120, Math.min(7200, dynamicTimeout));
   const audio = input.audio !== false;
   const thumbnail = input.thumbnail !== false;
   const thumbnailTitle = String(input.thumbnailTitle || '')
@@ -314,7 +320,6 @@ function normalizeOptions(input = {}) {
   const ttsVoice = String(input.ttsVoice || 'Alex').replace(/[^\w .'-]/g, '').trim().slice(0, 48) || 'Alex';
   const dryRun = input.dryRun === true || input.__dryRun === true;
   const obstacleDistribution = OBSTACLE_DISTRIBUTION_MODES.some((mode) => mode.value === input.obstacleDistribution) ? input.obstacleDistribution : 'random';
-  const raceCount = estimateRaceCount(recordMode, multipleRaceCount);
   return {
     recordMode,
     multipleRaceCount,
@@ -323,6 +328,7 @@ function normalizeOptions(input = {}) {
     density,
     obstacleTypes,
     format,
+    videoCapture,
     cupSize,
     lengthMode,
     targetSeconds,
@@ -601,7 +607,6 @@ function startRender(options) {
     `--length-mode=${options.lengthMode}`,
     `--obstacle-preset=${options.density}`,
     `--obstacle-distribution=${options.obstacleDistribution}`,
-    `--max-race-seconds=${options.maxRaceSeconds}`,
     `--width=${options.width}`,
     `--height=${options.height}`,
     `--fps=${options.fps}`,
@@ -613,7 +618,7 @@ function startRender(options) {
     `--thumbnail=${options.thumbnail ? 'true' : 'false'}`,
     `--thumbnail-output=${thumbnail}`,
     `--youtube-metadata-output=${youtubeMetadata}`,
-    '--video-capture=canvas',
+    `--video-capture=${options.videoCapture}`,
     '--video-canvas=horizontal',
     '--thumbnail-frame-strategy=mid-highlight',
     '--thumbnail-safe-crop=composite-no-live-event',
@@ -966,12 +971,19 @@ function dashboardHtml() {
             <select id="format" name="format"><option value="mp4" selected>MP4 + comparison WebM</option><option value="webm">WebM only</option></select>
           </div>
           <div>
+            <label for="videoCapture">錄影來源</label>
+            <select id="videoCapture" name="videoCapture">
+              <option value="canvas" selected>Canvas stream（default）</option>
+              <option value="playwright">Playwright viewport</option>
+            </select>
+          </div>
+          <div>
             <label for="qualityPreset">畫質</label>
             <select id="qualityPreset" name="qualityPreset">
-              <option value="1080p-smooth" selected>1080p Smooth（建議）</option>
-              <option value="1080p">1080p</option>
-              <option value="1440p">High 1440p</option>
-              <option value="4k">Ultra 4K</option>
+              <option value="1080p-smooth" selected>1080p Smooth（45fps）</option>
+              <option value="1080p">1080p（45fps）</option>
+              <option value="1440p">High 1440p（45fps）</option>
+              <option value="4k">Ultra 4K（45fps）</option>
             </select>
           </div>
           <div>
@@ -1254,6 +1266,7 @@ function renderJob(job) {
     'Distribution: ' + (job.options.obstacleDistribution || 'random'),
     'Types: ' + (job.options.obstacleTypes.length ? job.options.obstacleTypes.join(', ') : 'all'),
     'Format: ' + job.options.format + (job.options.format === 'mp4' ? ' + comparison WebM' : ''),
+    'Capture: ' + (job.options.videoCapture === 'playwright' ? 'Playwright viewport' : 'Canvas stream'),
     'Thumbnail: ' + (job.options.thumbnail ? 'on' : 'off'),
     job.options.thumbnailTitle ? 'Title: ' + job.options.thumbnailTitle : null,
     'Quality: ' + (job.options.qualityLabel || job.options.qualityPreset || (job.options.width + '×' + job.options.height)) + ' · ' + job.options.width + '×' + job.options.height + '@' + (job.options.fps || 60),
@@ -1299,6 +1312,7 @@ form.addEventListener('submit', async (event) => {
     obstacleDistribution: form.obstacleDistribution.value,
     obstacleTypes: selectedTypes(),
     format: form.format.value,
+    videoCapture: form.videoCapture?.value || 'canvas',
     qualityPreset: form.qualityPreset.value,
     cupSize: normalizeCupSize(),
     lengthMode: form.lengthMode.value,
@@ -1350,6 +1364,10 @@ async function handleRequest(req, res) {
       obstacleDistributionModes: OBSTACLE_DISTRIBUTION_MODES,
       densityPresets: DENSITY_PRESETS,
       backgroundRecordModes: BACKGROUND_RECORD_MODES,
+      videoCaptureModes: [
+        { value: 'canvas', label: 'Canvas stream', default: true },
+        { value: 'playwright', label: 'Playwright viewport' },
+      ],
       thumbnailTitlePresets: THUMBNAIL_TITLE_PRESETS,
     });
   }
