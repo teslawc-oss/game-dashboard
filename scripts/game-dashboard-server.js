@@ -13,6 +13,8 @@ const configPath = process.env.GAME_DASHBOARD_CONFIG || path.join(dashboardRoot,
 const dashboardConfig = JSON.parse(readFileSync(configPath, 'utf8'));
 const PORT = Number(process.env.GAME_DASHBOARD_PORT || process.env.MARBLE_DASHBOARD_PORT || dashboardConfig.dashboard?.port || 8888);
 const HOST = process.env.GAME_DASHBOARD_HOST || process.env.MARBLE_DASHBOARD_HOST || dashboardConfig.dashboard?.host || '127.0.0.1';
+const DASHBOARD_LAUNCH_AGENT_LABEL = process.env.GAME_DASHBOARD_LAUNCH_AGENT_LABEL || 'com.bert.game-dashboard';
+const DASHBOARD_LAUNCH_AGENT_PLIST = process.env.GAME_DASHBOARD_LAUNCH_AGENT_PLIST || '/Users/bert/Library/LaunchAgents/com.bert.game-dashboard.plist';
 const RENDER_PORT_START = Number(process.env.GAME_RENDER_PORT_START || process.env.MARBLE_RENDER_PORT_START || dashboardConfig.dashboard?.renderPortStart || 4300);
 const games = (dashboardConfig.games || []).map((game) => {
   const projectRoot = path.resolve(game.projectRoot);
@@ -722,6 +724,74 @@ function probeUrl(url, timeoutMs = 900) {
   });
 }
 
+function runLaunchctl(args) {
+  const result = spawnSync('launchctl', args, { encoding: 'utf8' });
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    signal: result.signal,
+    stdout: (result.stdout || '').trim(),
+    stderr: (result.stderr || '').trim(),
+  };
+}
+
+function getLaunchAgentDomainTarget() {
+  return `gui/${process.getuid?.() ?? Number(process.env.UID || 501)}`;
+}
+
+function getDashboardLaunchAgentStatus() {
+  const domainTarget = getLaunchAgentDomainTarget();
+  const print = runLaunchctl(['print', `${domainTarget}/${DASHBOARD_LAUNCH_AGENT_LABEL}`]);
+  const pidMatch = print.stdout.match(/\bpid\s*=\s*(\d+)/);
+  const stateMatch = print.stdout.match(/\bstate\s*=\s*([^\n]+)/);
+  return {
+    label: DASHBOARD_LAUNCH_AGENT_LABEL,
+    plist: DASHBOARD_LAUNCH_AGENT_PLIST,
+    domainTarget,
+    loaded: print.ok,
+    state: stateMatch ? stateMatch[1].trim() : (print.ok ? 'loaded' : 'not-loaded'),
+    pid: pidMatch ? Number(pidMatch[1]) : null,
+    error: print.ok ? null : (print.stderr || print.stdout || `launchctl print exited ${print.status}`),
+  };
+}
+
+function restartDashboardServer({ dryRun = false } = {}) {
+  const domainTarget = getLaunchAgentDomainTarget();
+  const serviceTarget = `${domainTarget}/${DASHBOARD_LAUNCH_AGENT_LABEL}`;
+  const command = ['launchctl', 'kickstart', '-k', serviceTarget];
+  const before = getDashboardLaunchAgentStatus();
+  if (dryRun) {
+    return {
+      restarted: false,
+      dryRun: true,
+      command: command.join(' '),
+      before,
+      message: 'dry-run only; dashboard server was not restarted',
+    };
+  }
+  if (!existsSync(DASHBOARD_LAUNCH_AGENT_PLIST)) {
+    return {
+      restarted: false,
+      dryRun: false,
+      command: command.join(' '),
+      before,
+      error: `LaunchAgent plist not found: ${DASHBOARD_LAUNCH_AGENT_PLIST}`,
+    };
+  }
+  setTimeout(() => {
+    const child = spawn(command[0], command.slice(1), { detached: true, stdio: 'ignore' });
+    child.unref();
+  }, 250);
+  return {
+    restarted: true,
+    scheduled: true,
+    dryRun: false,
+    command: command.join(' '),
+    before,
+    message: 'dashboard restart scheduled; this HTTP connection may drop while launchd restarts the server',
+  };
+}
+
 async function publicGameServerStatus() {
   const probe = await probeUrl(ACTIVE_SERVER_URL);
   const managedRunning = Boolean(gameServer.child && !gameServer.child.killed && ['starting', 'running'].includes(gameServer.status));
@@ -862,6 +932,7 @@ function dashboardHtml() {
     .game-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .game-badge { font-size: 11px; color: #06101c; background: linear-gradient(135deg, #8ef4ff, #b49cff); border-radius: 999px; padding: 4px 7px; font-weight: 900; }
     .quick-actions, .actions, .server-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .dashboard-actions { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.08); }
     .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .stat { padding: 8px; border-radius: 13px; background: rgba(255,255,255,.055); border: 1px solid rgba(255,255,255,.075); }
     .stat b { display: block; font-size: 12px; color: #dce7fb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -943,6 +1014,10 @@ function dashboardHtml() {
               <button id="serverStartBtn" type="button">Start</button>
               <button id="serverStopBtn" class="danger" type="button">Stop</button>
               <button id="serverRefreshBtn" class="secondary" type="button">Refresh</button>
+            </div>
+            <div class="quick-actions dashboard-actions">
+              <button id="dashboardRestartBtn" class="danger" type="button">Restart dashboard</button>
+              <span id="dashboardRestartStatus" class="muted">LaunchAgent: ${DASHBOARD_LAUNCH_AGENT_LABEL}</span>
             </div>
             <div id="serverMeta" class="muted">URL: ${ACTIVE_SERVER_URL}</div>
           </div>
@@ -1220,6 +1295,21 @@ async function controlGameServer(action) {
   if (data.server) renderGameServer(data.server);
   setTimeout(refreshGameServer, 900);
 }
+async function restartDashboard() {
+  if (!window.confirm('Restart dashboard server now? 頁面會短暫斷線，約幾秒後自動重連。')) return;
+  dashboardRestartBtn.disabled = true;
+  dashboardRestartStatus.textContent = 'Restarting dashboard server...';
+  try {
+    const res = await fetch('/api/dashboard/restart', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'restart failed');
+    dashboardRestartStatus.textContent = 'Restart requested · reconnecting...';
+    setTimeout(() => window.location.reload(), 2500);
+  } catch (error) {
+    dashboardRestartStatus.textContent = 'Restart failed: ' + error.message;
+    dashboardRestartBtn.disabled = false;
+  }
+}
 async function testGenerateThumbnail(videoName = '') {
   const title = form.thumbnailTitle?.value || 'CRAZY FIRST HIT';
   logEl.textContent = '生成測試 thumbnail 中...';
@@ -1240,6 +1330,7 @@ async function testGenerateThumbnail(videoName = '') {
 serverStartBtn.onclick = () => controlGameServer('start');
 serverStopBtn.onclick = () => controlGameServer('stop');
 serverRefreshBtn.onclick = refreshGameServer;
+dashboardRestartBtn.onclick = restartDashboard;
 if (testThumbnailBtn) testThumbnailBtn.onclick = () => testGenerateThumbnail('');
 function renderJob(job) {
   if (!job) { setStatus('idle'); if (progressBar) progressBar.style.width = '0%'; if (progressText) progressText.textContent = 'Progress 0%'; return; }
@@ -1374,6 +1465,16 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && (url.pathname === '/api/game-server' || url.pathname === '/api/marble-server')) {
     return jsonResponse(res, 200, { ok: true, server: await publicGameServerStatus() });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/dashboard/launch-agent') {
+    return jsonResponse(res, 200, { ok: true, launchAgent: getDashboardLaunchAgentStatus() });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/dashboard/restart') {
+    const body = await readRequestJson(req);
+    const result = restartDashboardServer({ dryRun: body.dryRun === true || url.searchParams.get('dryRun') === 'true' });
+    return jsonResponse(res, result.error ? 500 : 202, { ok: !result.error, ...result });
   }
 
   if (req.method === 'POST' && (url.pathname === '/api/game-server/start' || url.pathname === '/api/marble-server/start')) {
