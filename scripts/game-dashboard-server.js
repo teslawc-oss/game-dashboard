@@ -269,14 +269,14 @@ function calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRa
 
 function normalizeOptions(input = {}) {
   const cupName = String(input.cupName || 'Marble Cup').trim().slice(0, 80) || 'Marble Cup';
-  const recordMode = BACKGROUND_RECORD_MODES.some((mode) => mode.value === input.recordMode) ? input.recordMode : 'cup';
+  const recordMode = BACKGROUND_RECORD_MODES.some((mode) => mode.value === input.recordMode) ? input.recordMode : 'continuous';
   const multipleRaceCount = Math.max(1, Math.min(99, Math.round(Number(input.multipleRaceCount) || 5)));
   const density = DENSITY_PRESETS.some((item) => item.value === input.density) ? input.density : 'many';
   const requestedTypes = Array.isArray(input.obstacleTypes) ? input.obstacleTypes : [];
   const allowedTypes = new Set(OBSTACLE_TYPES.map((item) => item.value));
   const obstacleTypes = requestedTypes.filter((type) => allowedTypes.has(type));
   const format = input.format === 'webm' ? 'webm' : 'mp4';
-  const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 20)));
+  const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 12)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const qualitySettings = {
     '1080p-smooth': { width: 1920, height: 1080, crf: 14, captureScale: 1, fps: 60, videoPreset: 'slow', label: '1080p Smooth' },
@@ -363,6 +363,15 @@ function estimateJobProgress(job) {
   return { percent, elapsedSeconds: Math.round(elapsedSeconds), targetSeconds, label: `${mode} · ${Math.round(elapsedSeconds)}s / ${targetSeconds}s estimate` };
 }
 
+function recordingUrl(filePath) {
+  const relative = path.relative(recordingsDir, filePath).split(path.sep).join('/');
+  return `/recordings/${relative.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function recordingDisplayName(filePath) {
+  return path.relative(recordingsDir, filePath).split(path.sep).join('/');
+}
+
 function getCompanionOutputs(output, options = {}) {
   if (!output || options.format !== 'mp4') return [];
   const comparisonWebm = path.resolve(`${output.replace(/\.[^.]+$/, '')}.comparison.webm`);
@@ -370,10 +379,10 @@ function getCompanionOutputs(output, options = {}) {
     kind: 'comparison-webm',
     label: 'Comparison WebM',
     path: comparisonWebm,
-    name: path.basename(comparisonWebm),
+    name: recordingDisplayName(comparisonWebm),
     exists: existsSync(comparisonWebm),
     size: existsSync(comparisonWebm) ? statSync(comparisonWebm).size : 0,
-    url: `/recordings/${encodeURIComponent(path.basename(comparisonWebm))}`,
+    url: recordingUrl(comparisonWebm),
   }];
 }
 
@@ -381,6 +390,8 @@ function publicJob(job) {
   const outputExists = Boolean(job.output && existsSync(job.output));
   const thumbnail = job.thumbnail || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.thumbnail.jpg` : null);
   const thumbnailExists = Boolean(thumbnail && existsSync(thumbnail));
+  const youtubeMetadata = job.youtubeMetadata || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.youtube.json` : null);
+  const youtubeMetadataExists = Boolean(youtubeMetadata && existsSync(youtubeMetadata));
   const size = outputExists ? statSync(job.output).size : 0;
   return {
     id: job.id,
@@ -392,11 +403,16 @@ function publicJob(job) {
     signal: job.signal,
     options: job.options,
     output: job.output,
-    outputName: job.output ? path.basename(job.output) : null,
+    outputName: job.output ? recordingDisplayName(job.output) : null,
+    outputFolder: job.output ? recordingDisplayName(path.dirname(job.output)) : null,
     thumbnail,
-    thumbnailName: thumbnail ? path.basename(thumbnail) : null,
+    thumbnailName: thumbnail ? recordingDisplayName(thumbnail) : null,
     thumbnailExists,
-    thumbnailUrl: thumbnailExists ? `/recordings/${encodeURIComponent(path.basename(thumbnail))}` : null,
+    thumbnailUrl: thumbnailExists ? recordingUrl(thumbnail) : null,
+    youtubeMetadata,
+    youtubeMetadataName: youtubeMetadata ? recordingDisplayName(youtubeMetadata) : null,
+    youtubeMetadataExists,
+    youtubeMetadataUrl: youtubeMetadataExists ? recordingUrl(youtubeMetadata) : null,
     outputExists,
     companionOutputs: getCompanionOutputs(job.output, job.options),
     size,
@@ -408,20 +424,42 @@ function publicJob(job) {
   };
 }
 
+function listRecordingFiles(dir = recordingsDir, prefix = '') {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return listRecordingFiles(full, relative);
+    return [{ name: relative, full }];
+  });
+}
+
 function listRecordings() {
   if (!existsSync(recordingsDir)) return [];
-  return readdirSync(recordingsDir)
-    .filter((name) => /\.(webm|mp4|jpe?g|png)$/i.test(name))
-    .filter((name) => !/\.(metadata\.)?json$/i.test(name))
-    .map((name) => {
-      const full = path.join(recordingsDir, name);
+  return listRecordingFiles()
+    .filter(({ name }) => /\.(webm|mp4|jpe?g|png|json)$/i.test(name))
+    .filter(({ name }) => !/\.metadata\.json$/i.test(name))
+    .map(({ name, full }) => {
       const st = statSync(full);
+      const base = name.replace(/\.[^.]+$/, '');
+      const dir = path.dirname(name) === '.' ? '' : path.dirname(name);
+      const candidate = (suffix) => path.join(recordingsDir, dir, `${path.basename(base)}${suffix}`);
+      const thumbnailPath = candidate('.thumbnail.jpg');
+      const youtubePath = candidate('.youtube.json');
       return {
         name,
         path: full,
+        folder: dir || '.',
         size: st.size,
         modifiedAt: st.mtime.toISOString(),
-        url: `/recordings/${encodeURIComponent(name)}`,
+        url: recordingUrl(full),
+        isVideo: /\.(webm|mp4)$/i.test(name),
+        isThumbnail: /\.(?:thumbnail|test-thumbnail)\.jpe?g$/i.test(name),
+        isYoutubeMetadata: /\.youtube\.json$/i.test(name),
+        thumbnailExists: /\.(webm|mp4)$/i.test(name) && existsSync(thumbnailPath),
+        thumbnailUrl: recordingUrl(thumbnailPath),
+        youtubeMetadataExists: /\.(webm|mp4)$/i.test(name) && existsSync(youtubePath),
+        youtubeMetadataUrl: recordingUrl(youtubePath),
       };
     })
     .sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))
@@ -440,9 +478,11 @@ function commandText(command, extraArgs = []) {
 
 
 function safeRecordingName(name, allowedPattern = /\.(webm|mp4)$/i) {
-  const value = path.basename(String(name || ''));
-  if (!value || value !== String(name || '') || value.includes('..') || !allowedPattern.test(value)) return '';
-  const full = path.join(recordingsDir, value);
+  const value = String(name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!value || value.includes('..') || path.isAbsolute(value) || !allowedPattern.test(value)) return '';
+  const full = path.resolve(recordingsDir, value);
+  const root = path.resolve(recordingsDir);
+  if (full !== root && !full.startsWith(`${root}${path.sep}`)) return '';
   return existsSync(full) ? value : '';
 }
 
@@ -463,8 +503,12 @@ function generateThumbnailTest(input = {}) {
   const options = normalizeThumbnailTestOptions(input);
   if (!options.videoName) throw new Error('no video recording found; render or copy one .webm/.mp4 into recordings/ first');
   const videoPath = path.join(recordingsDir, options.videoName);
-  const thumbnailPath = path.join(recordingsDir, `${options.videoName.replace(/\.[^.]+$/, '')}.test-thumbnail.jpg`);
+  const videoBase = options.videoName.replace(/\.[^.]+$/, '');
+  const videoDir = path.dirname(videoPath);
+  const videoStem = path.basename(videoBase);
+  const thumbnailPath = path.join(videoDir, `${videoStem}.test-thumbnail.jpg`);
   const metadataPath = `${thumbnailPath}.metadata.json`;
+  const youtubeMetadataPath = path.join(videoDir, `${videoStem}.test-youtube.json`);
   const metadata = {
     title: options.title,
     thumbnailTitle: options.title,
@@ -481,10 +525,11 @@ function generateThumbnailTest(input = {}) {
     `--input=${videoPath}`,
     `--output=${thumbnailPath}`,
     `--metadata=${metadataPath}`,
-    '--frame-strategy=early-highlight',
-    '--safe-crop=hud-safe',
+    '--frame-strategy=first-race-30pct',
+    '--safe-crop=composite-no-live-event',
     '--max-words=6',
     `--title=${options.title}`,
+    `--youtube-metadata-output=${youtubeMetadataPath}`,
   ];
   const args = [...thumbnailBaseRest, ...extraArgs];
   const command = `${thumbnailBin || 'node'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`;
@@ -494,8 +539,10 @@ function generateThumbnailTest(input = {}) {
       dryRun: true,
       videoName: options.videoName,
       title: options.title,
-      thumbnailName: path.basename(thumbnailPath),
-      thumbnailUrl: `/recordings/${encodeURIComponent(path.basename(thumbnailPath))}`,
+      thumbnailName: recordingDisplayName(thumbnailPath),
+      thumbnailUrl: recordingUrl(thumbnailPath),
+      youtubeMetadataName: recordingDisplayName(youtubeMetadataPath),
+      youtubeMetadataUrl: recordingUrl(youtubeMetadataPath),
       command,
     };
   }
@@ -509,8 +556,11 @@ function generateThumbnailTest(input = {}) {
     dryRun: false,
     videoName: options.videoName,
     title: options.title,
-    thumbnailName: path.basename(thumbnailPath),
-    thumbnailUrl: `/recordings/${encodeURIComponent(path.basename(thumbnailPath))}`,
+    thumbnailName: recordingDisplayName(thumbnailPath),
+    thumbnailUrl: recordingUrl(thumbnailPath),
+    youtubeMetadataName: recordingDisplayName(youtubeMetadataPath),
+    youtubeMetadataUrl: recordingUrl(youtubeMetadataPath),
+    youtubeMetadataSize: existsSync(youtubeMetadataPath) ? statSync(youtubeMetadataPath).size : 0,
     size: existsSync(thumbnailPath) ? statSync(thumbnailPath).size : 0,
     log: [result.stdout, result.stderr].filter(Boolean).join('\n').slice(-8000),
     command,
@@ -527,8 +577,11 @@ function startRender(options) {
     continuous: `multiple-${options.multipleRaceCount || 5}`,
     cup: 'cup-mode',
   }[options.recordMode] || 'cup-mode';
-  const output = path.join(recordingsDir, `${stamp}-${slug}-${modeSlug}-${options.density}-${typeSlug}.${options.format}`);
-  const thumbnail = path.join(recordingsDir, `${stamp}-${slug}-${modeSlug}-${options.density}-${typeSlug}.thumbnail.jpg`);
+  const bundleName = `${stamp}-${slug}-${modeSlug}-${options.density}-${typeSlug}`;
+  const bundleDir = path.join(recordingsDir, bundleName);
+  const output = path.join(bundleDir, `${bundleName}.${options.format}`);
+  const thumbnail = path.join(bundleDir, `${bundleName}.thumbnail.jpg`);
+  const youtubeMetadata = path.join(bundleDir, `${bundleName}.youtube.json`);
   const renderPort = nextRenderPort++;
   const renderUrl = `http://127.0.0.1:${renderPort}`;
   const baseRenderArgs = splitCommand(activeGame.render.command);
@@ -555,8 +608,11 @@ function startRender(options) {
     `--tts-voice=${options.ttsVoice}`,
     `--thumbnail=${options.thumbnail ? 'true' : 'false'}`,
     `--thumbnail-output=${thumbnail}`,
-    '--thumbnail-frame-strategy=early-highlight',
-    '--thumbnail-safe-crop=hud-safe',
+    `--youtube-metadata-output=${youtubeMetadata}`,
+    '--video-capture=canvas',
+    '--video-canvas=horizontal',
+    '--thumbnail-frame-strategy=first-race-30pct',
+    '--thumbnail-safe-crop=composite-no-live-event',
     '--thumbnail-max-words=6',
     `--port=${renderPort}`,
     `--url=${renderUrl}`,
@@ -578,6 +634,7 @@ function startRender(options) {
     options,
     output,
     thumbnail,
+    youtubeMetadata,
     renderPort,
     command: `${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`,
     log: options.dryRun ? `[dry-run] Would run from ${rootDir}\n[dry-run] ${`${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`}\n` : '',
@@ -759,7 +816,7 @@ function dashboardHtml() {
   `).join('');
   const backgroundRecordModeCards = BACKGROUND_RECORD_MODES.map((mode) => `
     <label class="record-mode-card" data-background-record-mode="${mode.key}">
-      <input type="radio" name="recordMode" value="${mode.value}" ${mode.value === 'cup' ? 'checked' : ''}>
+      <input type="radio" name="recordMode" value="${mode.value}" ${mode.value === 'continuous' ? 'checked' : ''}>
       <b>${mode.label}</b>
       <span>${mode.description}</span>
     </label>
@@ -898,7 +955,7 @@ function dashboardHtml() {
           </div>
           <div>
             <label for="cupSize">波子數目</label>
-            <input id="cupSize" name="cupSize" type="number" min="2" max="99" step="1" value="20">
+            <input id="cupSize" name="cupSize" type="number" min="2" max="99" step="1" value="12">
           </div>
           <div>
             <label for="format">格式</label>
@@ -1054,7 +1111,7 @@ function normalizeMultipleRaceCount() {
 }
 function normalizeCupSize() {
   const raw = Number(cupSizeInput?.value);
-  const count = Number.isFinite(raw) ? Math.round(raw) : 20;
+  const count = Number.isFinite(raw) ? Math.round(raw) : 12;
   return Math.max(2, Math.min(99, count));
 }
 function updateRecordModeHint() {
@@ -1176,7 +1233,8 @@ function renderJob(job) {
     ' · <a href="' + item.url + '" target="_blank">' + item.label + ' (' + fmtBytes(item.size) + ')</a>'
   ).join('');
   jobMeta.innerHTML = 'Job #' + job.id + ' · ' + (job.outputName || '') + ' · ' + (job.size ? fmtBytes(job.size) : 'rendering...') + primaryLink + companionLinks +
-    (job.thumbnailExists ? ' · <a href="' + job.thumbnailUrl + '" target="_blank">Thumbnail</a>' : '');
+    (job.thumbnailExists ? ' · <a href="' + job.thumbnailUrl + '" target="_blank">Thumbnail</a>' : '') +
+    (job.youtubeMetadataExists ? ' · <a href="' + job.youtubeMetadataUrl + '" target="_blank">YouTube JSON</a>' : '');
   jobPills.innerHTML = [
     'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : 'Cup Mode'),
     job.options.recordMode === 'continuous' ? 'Races: ' + (job.options.multipleRaceCount || 5) : null,
@@ -1201,10 +1259,11 @@ async function refreshRecordings() {
   const res = await fetch('/api/recordings');
   const data = await res.json();
   recEl.innerHTML = data.recordings.length ? data.recordings.map((rec) =>
-    '<div class="recording"><div><a href="' + rec.url + '" target="_blank">' + rec.name + '</a><div class="muted">' + fmtBytes(rec.size) + ' · ' + rec.modifiedAt + (rec.isThumbnail ? ' · thumbnail' : '') + '</div>' +
+    '<div class="recording"><div><a href="' + rec.url + '" target="_blank">' + rec.name + '</a><div class="muted">' + fmtBytes(rec.size) + ' · ' + rec.modifiedAt + (rec.isThumbnail ? ' · thumbnail' : '') + (rec.isYoutubeMetadata ? ' · YouTube JSON' : '') + '</div>' +
     (rec.isThumbnail ? '<img class="thumb-preview" src="' + rec.url + '?v=' + encodeURIComponent(rec.modifiedAt) + '" alt="thumbnail preview">' : '') + '</div><div class="recording-actions">' +
     (rec.isVideo ? '<button class="secondary" type="button" data-thumb-video="' + rec.name.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">Test thumbnail</button>' : '') +
-    (rec.thumbnailExists && rec.isVideo ? '<a href="' + rec.thumbnailUrl + '" target="_blank">thumbnail</a>' : '') + '</div></div>'
+    (rec.thumbnailExists && rec.isVideo ? '<a href="' + rec.thumbnailUrl + '" target="_blank">thumbnail</a>' : '') +
+    (rec.youtubeMetadataExists && rec.isVideo ? '<a href="' + rec.youtubeMetadataUrl + '" target="_blank">YouTube JSON</a>' : '') + '</div></div>'
   ).join('') : '<p class="muted">暫無影片</p>';
   recEl.querySelectorAll('[data-thumb-video]').forEach((btn) => {
     btn.addEventListener('click', () => testGenerateThumbnail(btn.getAttribute('data-thumb-video') || ''));
@@ -1347,15 +1406,17 @@ async function handleRequest(req, res) {
     return jsonResponse(res, 200, { ok: true, recordings: listRecordings() });
   }
 
-  const recordingMatch = url.pathname.match(/^\/recordings\/([^/]+)$/);
+  const recordingMatch = url.pathname.match(/^\/recordings\/(.+)$/);
   if (req.method === 'GET' && recordingMatch) {
-    const name = decodeURIComponent(recordingMatch[1]);
-    if (name.includes('/') || name.includes('..') || !/\.(webm|mp4|jpe?g|png)$/i.test(name)) return notFound(res);
-    const full = path.join(recordingsDir, name);
+    const name = decodeURIComponent(recordingMatch[1]).replace(/\\/g, '/');
+    if (name.startsWith('/') || name.includes('..') || !/\.(webm|mp4|jpe?g|png|json)$/i.test(name) || /\.metadata\.json$/i.test(name)) return notFound(res);
+    const full = path.resolve(recordingsDir, name);
+    const root = path.resolve(recordingsDir);
+    if (full !== root && !full.startsWith(`${root}${path.sep}`)) return notFound(res);
     if (!existsSync(full)) return notFound(res);
     const ext = path.extname(name).toLowerCase();
     res.writeHead(200, {
-      'content-type': ext === '.mp4' ? 'video/mp4' : ext === '.webm' ? 'video/webm' : ext === '.png' ? 'image/png' : 'image/jpeg',
+      'content-type': ext === '.mp4' ? 'video/mp4' : ext === '.webm' ? 'video/webm' : ext === '.png' ? 'image/png' : ext === '.json' ? 'application/json; charset=utf-8' : 'image/jpeg',
       'content-length': statSync(full).size,
       'cache-control': 'no-store',
     });
