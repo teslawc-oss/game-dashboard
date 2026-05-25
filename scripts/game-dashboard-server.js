@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -177,6 +177,8 @@ const CUP_STAGE_TRACK_LENGTHS = {
 };
 const CUP_STAGE_TRACK_LABEL = 'Cup unified 600m';
 const RACE_SECONDS_PER_METER = 90 / 300;
+const FINAL_RACE_NODE_GATE_SECONDS = 18;
+const WALL_CLOCK_CAPTURE_FACTOR = 1.85;
 function estimateMaxRaceSecondsForTrackLength(trackLength) {
   return Math.max(45, Math.min(1200, Math.ceil(trackLength * RACE_SECONDS_PER_METER)));
 }
@@ -186,9 +188,8 @@ const CUP_VIDEO_DEFAULTS = {
   targetMinutes: 10,
   trackLength: 600,
   stageTrackLengths: CUP_STAGE_TRACK_LENGTHS,
-  maxRaceSeconds: estimateMaxRaceSecondsForTrackLength(600),
   timeout: 1800,
-  label: 'Dashboard default supports target video duration or fixed per-race track length; max race seconds follows track length at 300m ≈ 90s',
+  label: 'Dashboard default supports target video duration or fixed per-race track length; render script owns per-race timeout unless explicitly overridden outside dashboard',
 };
 
 const jobs = new Map();
@@ -247,6 +248,10 @@ function safeSlug(value, fallback = 'marble-cup') {
   return slug || fallback;
 }
 
+function renderTitleSlug(options = {}, fallbackParts = []) {
+  const title = options.thumbnailTitle || options.cupName || fallbackParts.filter(Boolean).join('-');
+  return safeSlug(title, 'marble-rush');
+}
 
 function clampNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -262,8 +267,36 @@ function estimateRaceCount(recordMode, multipleRaceCount) {
 
 function estimateNonRaceSeconds(recordMode, raceCount) {
   if (recordMode === 'cup') return 164;
-  if (recordMode === 'continuous') return 2 + Math.max(0, raceCount - 1) * 10 + 5;
+  if (recordMode === 'continuous') return 2 + Math.max(0, raceCount - 1) * 10 + FINAL_RACE_NODE_GATE_SECONDS;
   return 7;
+}
+
+function estimateOutputVideoSeconds({ recordMode, raceCount, trackLength }) {
+  return Math.ceil((estimateMaxRaceSecondsForTrackLength(trackLength) * raceCount) + estimateNonRaceSeconds(recordMode, raceCount));
+}
+
+function estimateEncodeFactor(videoPreset) {
+  return ({
+    ultrafast: 0.15,
+    superfast: 0.2,
+    veryfast: 0.35,
+    faster: 0.5,
+    fast: 0.7,
+    medium: 0.9,
+    slow: 1.2,
+    slower: 1.8,
+    veryslow: 2.5,
+  })[videoPreset] ?? 0.5;
+}
+
+function estimateWallClockSeconds(options) {
+  const outputSeconds = estimateOutputVideoSeconds(options);
+  const captureSeconds = outputSeconds * WALL_CLOCK_CAPTURE_FACTOR;
+  const comparisonSeconds = options.format === 'mp4' ? outputSeconds * 0.08 : 0;
+  const encodeSeconds = outputSeconds * estimateEncodeFactor(options.videoPreset);
+  const thumbnailSeconds = options.thumbnail ? 8 : 0;
+  const fixedSeconds = 25;
+  return Math.ceil(captureSeconds + comparisonSeconds + encodeSeconds + thumbnailSeconds + fixedSeconds);
 }
 
 function calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRaceCount }) {
@@ -275,7 +308,7 @@ function calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRa
 }
 
 function normalizeOptions(input = {}) {
-  const cupName = String(input.cupName || 'Marble Cup').trim().slice(0, 80) || 'Marble Cup';
+  const cupName = String(input.cupName || '').trim().slice(0, 80);
   const recordMode = BACKGROUND_RECORD_MODES.some((mode) => mode.value === input.recordMode) ? input.recordMode : 'continuous';
   const multipleRaceCount = Math.max(1, Math.min(99, Math.round(Number(input.multipleRaceCount) || 5)));
   const density = DENSITY_PRESETS.some((item) => item.value === input.density) ? input.density : 'many';
@@ -314,6 +347,15 @@ function normalizeOptions(input = {}) {
     : Math.max(120, Math.min(7200, dynamicTimeout));
   const audio = input.audio !== false;
   const thumbnail = input.thumbnail !== false;
+  const estimatedOutputSeconds = estimateOutputVideoSeconds({ recordMode, raceCount, trackLength });
+  const estimatedWallClockSeconds = estimateWallClockSeconds({
+    recordMode,
+    raceCount,
+    trackLength,
+    format,
+    videoPreset,
+    thumbnail,
+  });
   const thumbnailTitle = String(input.thumbnailTitle || '')
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -339,7 +381,9 @@ function normalizeOptions(input = {}) {
     trackLength,
     manualTrackLength,
     calculatedTrackLength: trackLength,
-    maxRaceSeconds,
+    estimatedMaxRaceSeconds: maxRaceSeconds,
+    estimatedOutputSeconds,
+    estimatedWallClockSeconds,
     qualityPreset,
     qualityLabel: qualitySettings.label,
     width,
@@ -369,10 +413,25 @@ function estimateJobProgress(job) {
   if (job.status === 'failed') return { percent: 100, label: 'Failed' };
   if (job.status === 'stopping') return { percent: 99, label: 'Stopping' };
   const elapsedSeconds = Math.max(0, (Date.now() - Date.parse(job.startedAt || job.createdAt || new Date().toISOString())) / 1000);
-  const targetSeconds = Math.max(60, Number(job.options?.targetSeconds) || 600);
-  const percent = Math.max(1, Math.min(95, Math.round((elapsedSeconds / targetSeconds) * 100)));
+  const estimateSeconds = Math.max(
+    60,
+    Number(job.options?.estimatedWallClockSeconds)
+      || Number(job.options?.timeout)
+      || Number(job.options?.targetSeconds)
+      || 600,
+  );
+  const outputSeconds = Math.max(1, Number(job.options?.estimatedOutputSeconds) || Number(job.options?.targetSeconds) || 600);
+  const percent = Math.max(1, Math.min(95, Math.round((elapsedSeconds / estimateSeconds) * 100)));
   const mode = job.options?.recordMode === 'continuous' ? `Multiple ${job.options?.multipleRaceCount || ''}` : job.options?.recordMode === 'cup' ? 'Cup Mode' : 'Single';
-  return { percent, elapsedSeconds: Math.round(elapsedSeconds), targetSeconds, label: `${mode} · ${Math.round(elapsedSeconds)}s / ${targetSeconds}s estimate` };
+  return {
+    percent,
+    elapsedSeconds: Math.round(elapsedSeconds),
+    targetSeconds: outputSeconds,
+    estimateSeconds,
+    estimatedOutputSeconds: outputSeconds,
+    estimatedWallClockSeconds: estimateSeconds,
+    label: `${mode} · ${Math.round(elapsedSeconds)}s / ~${estimateSeconds}s render estimate · output ~${outputSeconds}s`,
+  };
 }
 
 function recordingUrl(filePath) {
@@ -404,6 +463,8 @@ function publicJob(job) {
   const thumbnailExists = Boolean(thumbnail && existsSync(thumbnail));
   const youtubeMetadata = job.youtubeMetadata || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.youtube.json` : null);
   const youtubeMetadataExists = Boolean(youtubeMetadata && existsSync(youtubeMetadata));
+  const renderLog = job.renderLog || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.render.log` : null);
+  const renderLogExists = Boolean(renderLog && existsSync(renderLog));
   const size = outputExists ? statSync(job.output).size : 0;
   return {
     id: job.id,
@@ -425,6 +486,10 @@ function publicJob(job) {
     youtubeMetadataName: youtubeMetadata ? recordingDisplayName(youtubeMetadata) : null,
     youtubeMetadataExists,
     youtubeMetadataUrl: youtubeMetadataExists ? recordingUrl(youtubeMetadata) : null,
+    renderLog,
+    renderLogName: renderLog ? recordingDisplayName(renderLog) : null,
+    renderLogExists,
+    renderLogUrl: renderLogExists ? recordingUrl(renderLog) : null,
     outputExists,
     companionOutputs: getCompanionOutputs(job.output, job.options),
     size,
@@ -582,25 +647,20 @@ function generateThumbnailTest(input = {}) {
 function startRender(options) {
   const id = String(nextJobId++);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const slug = safeSlug(options.cupName, 'marble-cup');
+  const titleSlug = renderTitleSlug(options, [options.recordMode, options.density, options.lengthMode]);
   const typeSlug = options.obstacleTypes.length ? options.obstacleTypes.join('-') : 'all-obstacles';
-  const modeSlug = {
-    single: 'single-record',
-    continuous: `multiple-${options.multipleRaceCount || 5}`,
-    cup: 'cup-mode',
-  }[options.recordMode] || 'cup-mode';
-  const bundleName = `${stamp}-${slug}-${modeSlug}-${options.density}-${typeSlug}`;
+  const bundleName = `${stamp}-${titleSlug}`;
   const bundleDir = path.join(recordingsDir, bundleName);
-  const output = path.join(bundleDir, `${bundleName}.${options.format}`);
-  const thumbnail = path.join(bundleDir, `${bundleName}.thumbnail.jpg`);
-  const youtubeMetadata = path.join(bundleDir, `${bundleName}.youtube.json`);
+  const output = path.join(bundleDir, `${titleSlug}.output.${options.format}`);
+  const thumbnail = path.join(bundleDir, `${titleSlug}.thumbnail.jpg`);
+  const youtubeMetadata = path.join(bundleDir, `${titleSlug}.youtube.json`);
+  const renderLog = path.join(bundleDir, `${titleSlug}.log`);
   const renderPort = nextRenderPort++;
   const renderUrl = `http://127.0.0.1:${renderPort}`;
   const baseRenderArgs = splitCommand(activeGame.render.command);
   const renderExtraArgs = [
     `--output=${output}`,
     `--format=${options.format}`,
-    `--cup-name=${options.cupName}`,
     `--mode=${options.recordMode}`,
     `--multiple-race-count=${options.multipleRaceCount}`,
     `--cup-size=${options.cupSize}`,
@@ -644,8 +704,12 @@ function startRender(options) {
     signal: null,
     options,
     output,
+    outputFolder: bundleDir,
+    outputTitle: titleSlug,
+    outputTypeSlug: typeSlug,
     thumbnail,
     youtubeMetadata,
+    renderLog,
     renderPort,
     command: `${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`,
     log: options.dryRun ? `[dry-run] Would run from ${rootDir}\n[dry-run] ${`${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`}\n` : '',
@@ -654,7 +718,11 @@ function startRender(options) {
   };
   jobs.set(id, job);
 
-  if (options.dryRun) return job;
+  mkdirSync(bundleDir, { recursive: true });
+  if (options.dryRun) {
+    writeFileSync(renderLog, job.log);
+    return job;
+  }
 
   const child = spawn(renderBin || 'npm', args, {
     cwd: rootDir,
@@ -664,7 +732,9 @@ function startRender(options) {
   job.child = child;
 
   const append = (chunk) => {
-    job.log += chunk.toString();
+    const text = chunk.toString();
+    job.log += text;
+    appendFileSync(renderLog, text);
     if (job.log.length > 60000) job.log = job.log.slice(-60000);
   };
   child.stdout.on('data', append);
@@ -680,6 +750,7 @@ function startRender(options) {
     job.finishedAt = new Date().toISOString();
     job.status = code === 0 ? 'completed' : 'failed';
     if (code !== 0 && !job.error) job.error = `render exited with ${code ?? signal}`;
+    appendFileSync(renderLog, `\n[dashboard] render job ${job.status} exit=${code ?? ''} signal=${signal ?? ''} finishedAt=${job.finishedAt}\n`);
   });
 
   return job;
@@ -1034,8 +1105,8 @@ function dashboardHtml() {
         <div class="card-head"><h2>${activeGame.name} Render</h2><span class="muted">background recording</span></div>
         <div class="form-grid">
           <div class="wide">
-            <label for="cupName">Cup 名稱</label>
-            <input id="cupName" name="cupName" type="text" value="Bumper Cup" maxlength="80">
+            <label for="cupName">Cup 名稱（Dashboard 不會傳去 render，只作備註）</label>
+            <input id="cupName" name="cupName" type="text" value="" maxlength="80" placeholder="可留空；影片不顯示、不傳 --cup-name">
           </div>
           <div>
             <label for="cupSize">波子數目</label>
@@ -1092,14 +1163,14 @@ function dashboardHtml() {
           <label class="check"><input id="audio" name="audio" type="checkbox" checked> <span>遊戲音訊</span></label>
           <label class="check thumbnail-toggle"><input id="thumbnail" name="thumbnail" type="checkbox" checked> <span>YouTube thumbnail 會自動生成</span></label>
           <div class="wide thumbnail-panel" data-dashboard-section="thumbnail-controls">
-            <label for="thumbnailTitle">Thumbnail 大字（約 6 字）</label>
+            <label for="thumbnailTitle">Thumbnail 大字 override（留空＝按 event 自動揀近期不重覆標題）</label>
             <div class="title-row">
-              <input id="thumbnailTitle" name="thumbnailTitle" type="text" value="CRAZY FIRST HIT" maxlength="80" placeholder="例：CRAZY FIRST HIT" list="thumbnailTitlePresets">
+              <input id="thumbnailTitle" name="thumbnailTitle" type="text" value="" maxlength="80" placeholder="留空自動揀；輸入才 override" list="thumbnailTitlePresets">
               <button id="randomTitleBtn" class="secondary" type="button">Random</button>
               <button id="testThumbnailBtn" class="secondary" type="button">Test latest thumbnail</button>
             </div>
             <datalist id="thumbnailTitlePresets">${thumbnailTitleOptions}</datalist>
-            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。</p>
+            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。留空 Thumbnail 大字時，由 render 根據 event 自動選近期不重覆標題。</p>
           </div>
         </div>
 
@@ -1348,11 +1419,11 @@ function renderJob(job) {
   jobPills.innerHTML = [
     'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : 'Cup Mode'),
     job.options.recordMode === 'continuous' ? 'Races: ' + (job.options.multipleRaceCount || 5) : null,
-    'Cup: ' + job.options.cupName,
+    job.options.cupName ? 'Cup note: ' + job.options.cupName : null,
     'Length mode: ' + (job.options.lengthMode === 'fixed-track' ? 'Fixed track' : 'Target duration'),
     'Target: ' + (job.options.targetMinutes || 10) + ' min',
     'Track: ' + (job.options.stageTrackLabel || (job.options.trackLength + 'm')),
-    'Max race: ' + (job.options.maxRaceSeconds || estimateDashboardMaxRaceSeconds(job.options.trackLength || 600)) + 's',
+    'Estimated max race: ' + (job.options.estimatedMaxRaceSeconds || estimateDashboardMaxRaceSeconds(job.options.trackLength || 600)) + 's (not passed)',
     'Density: ' + job.options.density,
     'Distribution: ' + (job.options.obstacleDistribution || 'random'),
     'Types: ' + (job.options.obstacleTypes.length ? job.options.obstacleTypes.join(', ') : 'all'),
