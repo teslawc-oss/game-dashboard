@@ -410,10 +410,10 @@ function normalizeOptions(input = {}) {
     : Math.max(120, Math.min(7200, dynamicTimeout));
   const audio = input.audio !== false;
   const thumbnail = input.thumbnail !== false;
-  const uploadYoutube = input.uploadYoutube !== false;
+  const uploadYoutube = input.uploadYoutube === true;
   const youtubePrivacy = ['private', 'unlisted', 'public'].includes(String(input.youtubePrivacy || '').toLowerCase())
     ? String(input.youtubePrivacy).toLowerCase()
-    : 'public';
+    : 'private';
   const estimatedOutputSeconds = estimateOutputVideoSeconds({ recordMode, raceCount, trackLength });
   const estimatedWallClockSeconds = estimateWallClockSeconds({
     recordMode,
@@ -1272,13 +1272,13 @@ function dashboardHtml() {
           </div>
           <label class="check"><input id="audio" name="audio" type="checkbox" checked> <span>遊戲音訊</span></label>
           <label class="check thumbnail-toggle"><input id="thumbnail" name="thumbnail" type="checkbox" checked> <span>YouTube thumbnail 會自動生成</span></label>
-          <label class="check"><input id="uploadYoutube" name="uploadYoutube" type="checkbox" checked> <span>生成完成後自動上傳 YouTube</span></label>
+          <label class="check"><input id="uploadYoutube" name="uploadYoutube" type="checkbox"> <span>完成後上傳 YouTube（預設關閉；要公開前先用 Private/Unlisted 驗證）</span></label>
           <div>
             <label for="youtubePrivacy">YouTube privacy</label>
             <select id="youtubePrivacy" name="youtubePrivacy">
-              <option value="public" selected>Public（default）</option>
-              <option value="private">Private</option>
+              <option value="private" selected>Private（safe test）</option>
               <option value="unlisted">Unlisted</option>
+              <option value="public">Public（確認後先好用）</option>
             </select>
           </div>
           <div class="wide thumbnail-panel" data-dashboard-section="thumbnail-controls">
@@ -1289,7 +1289,7 @@ function dashboardHtml() {
               <button id="testThumbnailBtn" class="secondary" type="button">Test latest thumbnail</button>
             </div>
             <datalist id="thumbnailTitlePresets">${thumbnailTitleOptions}</datalist>
-            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。留空 Thumbnail 大字時，由 render 根據 event 自動選近期不重覆標題。YouTube 上傳預設開啟，privacy 預設 Public；測試時可改 Private。</p>
+            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。留空 Thumbnail 大字時，由 render 根據 event 自動選近期不重覆標題。YouTube upload 預設關閉；如果要測試上傳，先用 Private/Unlisted，確認 metadata/thumbnail 無誤後才改 Public。</p>
           </div>
         </div>
 
@@ -1662,11 +1662,15 @@ async function handleRequest(req, res) {
       ],
       thumbnailTitlePresets: THUMBNAIL_TITLE_PRESETS,
       youtubePrivacyModes: [
-        { value: 'public', label: 'Public', default: true },
-        { value: 'private', label: 'Private' },
+        { value: 'private', label: 'Private', default: true },
         { value: 'unlisted', label: 'Unlisted' },
+        { value: 'public', label: 'Public' },
       ],
-      defaults: { uploadYoutube: true, youtubePrivacy: 'public' },
+      videoCanvasLayouts: [
+        { value: 'horizontal', label: 'Horizontal 16:9', default: true, youtubeKind: 'long', width: 1920, height: 1080 },
+        { value: 'vertical', label: 'Vertical 9:16 Shorts', youtubeKind: 'shorts', width: 1080, height: 1920 },
+      ],
+      defaults: { uploadYoutube: false, youtubePrivacy: 'private', videoCanvasLayout: 'horizontal' },
     });
   }
 
