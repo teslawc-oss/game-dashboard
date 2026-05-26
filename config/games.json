@@ -16,8 +16,8 @@
       "server": {
         "host": "127.0.0.1",
         "port": 5173,
-        "url": "http://127.0.0.1:5173",
-        "startCommand": "npm run dev -- --host 127.0.0.1 --port 5173"
+        "url": "https://itdog.mynetgear.com:5173",
+        "startCommand": "npm run dev:stack"
       },
       "render": {
         "command": "npm run render:auto-cup -- --no-build"

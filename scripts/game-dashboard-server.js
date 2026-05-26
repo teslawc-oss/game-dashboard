@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http';
+import https from 'node:https';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -14,6 +15,9 @@ const configPath = process.env.GAME_DASHBOARD_CONFIG || path.join(dashboardRoot,
 const dashboardConfig = JSON.parse(readFileSync(configPath, 'utf8'));
 const PORT = Number(process.env.GAME_DASHBOARD_PORT || process.env.MARBLE_DASHBOARD_PORT || dashboardConfig.dashboard?.port || 8888);
 const HOST = process.env.GAME_DASHBOARD_HOST || process.env.MARBLE_DASHBOARD_HOST || dashboardConfig.dashboard?.host || '127.0.0.1';
+const HTTPS_ENABLED = ['1', 'true', 'yes', 'on'].includes(String(process.env.GAME_DASHBOARD_HTTPS || process.env.MARBLE_DASHBOARD_HTTPS || '').toLowerCase());
+const HTTPS_CERT_PATH = process.env.GAME_DASHBOARD_HTTPS_CERT || process.env.MARBLE_DASHBOARD_HTTPS_CERT || dashboardConfig.dashboard?.httpsCert || '';
+const HTTPS_KEY_PATH = process.env.GAME_DASHBOARD_HTTPS_KEY || process.env.MARBLE_DASHBOARD_HTTPS_KEY || dashboardConfig.dashboard?.httpsKey || '';
 const DASHBOARD_PASSWORD = String(process.env.GAME_DASHBOARD_PASSWORD || process.env.MARBLE_DASHBOARD_PASSWORD || dashboardConfig.dashboard?.password || '');
 const DASHBOARD_AUTH_USER = String(process.env.GAME_DASHBOARD_AUTH_USER || process.env.MARBLE_DASHBOARD_AUTH_USER || dashboardConfig.dashboard?.authUser || 'bert');
 const DASHBOARD_LAUNCH_AGENT_LABEL = process.env.GAME_DASHBOARD_LAUNCH_AGENT_LABEL || 'com.bert.game-dashboard';
@@ -2657,17 +2661,30 @@ async function handleRequest(req, res) {
   return notFound(res);
 }
 
-const server = http.createServer((req, res) => {
-  handleRequest(req, res).catch((error) => {
-    console.error(error);
-    jsonResponse(res, 500, { ok: false, error: error.message });
-  });
-});
+const serverOptions = HTTPS_ENABLED ? {
+  cert: readFileSync(HTTPS_CERT_PATH),
+  key: readFileSync(HTTPS_KEY_PATH),
+} : null;
+
+const server = HTTPS_ENABLED
+  ? https.createServer(serverOptions, (req, res) => {
+      handleRequest(req, res).catch((error) => {
+        console.error(error);
+        jsonResponse(res, 500, { ok: false, error: error.message });
+      });
+    })
+  : http.createServer((req, res) => {
+      handleRequest(req, res).catch((error) => {
+        console.error(error);
+        jsonResponse(res, 500, { ok: false, error: error.message });
+      });
+    });
 
 startScheduleWorker();
 
 server.listen(PORT, HOST, () => {
-  console.log(`[game-dashboard] http://${HOST}:${PORT}`);
+  const protocol = HTTPS_ENABLED ? 'https' : 'http';
+  console.log(`[game-dashboard] ${protocol}://${HOST}:${PORT}`);
   console.log(`[game-dashboard] config: ${configPath}`);
   console.log(`[game-dashboard] active game: ${activeGame.id} @ ${rootDir}`);
 });
