@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -13,6 +14,8 @@ const configPath = process.env.GAME_DASHBOARD_CONFIG || path.join(dashboardRoot,
 const dashboardConfig = JSON.parse(readFileSync(configPath, 'utf8'));
 const PORT = Number(process.env.GAME_DASHBOARD_PORT || process.env.MARBLE_DASHBOARD_PORT || dashboardConfig.dashboard?.port || 8888);
 const HOST = process.env.GAME_DASHBOARD_HOST || process.env.MARBLE_DASHBOARD_HOST || dashboardConfig.dashboard?.host || '127.0.0.1';
+const DASHBOARD_PASSWORD = String(process.env.GAME_DASHBOARD_PASSWORD || process.env.MARBLE_DASHBOARD_PASSWORD || dashboardConfig.dashboard?.password || '');
+const DASHBOARD_AUTH_USER = String(process.env.GAME_DASHBOARD_AUTH_USER || process.env.MARBLE_DASHBOARD_AUTH_USER || dashboardConfig.dashboard?.authUser || 'bert');
 const DASHBOARD_LAUNCH_AGENT_LABEL = process.env.GAME_DASHBOARD_LAUNCH_AGENT_LABEL || 'com.bert.game-dashboard';
 const DASHBOARD_LAUNCH_AGENT_PLIST = process.env.GAME_DASHBOARD_LAUNCH_AGENT_PLIST || '/Users/bert/Library/LaunchAgents/com.bert.game-dashboard.plist';
 const RENDER_PORT_START = Number(process.env.GAME_RENDER_PORT_START || process.env.MARBLE_RENDER_PORT_START || dashboardConfig.dashboard?.renderPortStart || 4300);
@@ -46,6 +49,62 @@ const ACTIVE_SERVER_PORT = activeGame.server.port;
 const ACTIVE_SERVER_URL = activeGame.server.url;
 
 mkdirSync(recordingsDir, { recursive: true });
+
+const LOCAL_DASHBOARD_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+function requestHostName(req) {
+  const rawHost = String(req.headers.host || '').trim().toLowerCase();
+  if (!rawHost) return '';
+  if (rawHost.startsWith('[')) return rawHost.slice(0, rawHost.indexOf(']') + 1);
+  return rawHost.split(':')[0];
+}
+
+function isLocalDashboardRequest(req) {
+  const hostName = requestHostName(req);
+  return !hostName || LOCAL_DASHBOARD_HOSTS.has(hostName);
+}
+
+function safeEqualString(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function hasValidDashboardPassword(req) {
+  const header = String(req.headers.authorization || '');
+  if (!header.toLowerCase().startsWith('basic ')) return false;
+  let decoded = '';
+  try {
+    decoded = Buffer.from(header.slice(6).trim(), 'base64').toString('utf8');
+  } catch {
+    return false;
+  }
+  const separator = decoded.indexOf(':');
+  if (separator < 0) return false;
+  const user = decoded.slice(0, separator);
+  const password = decoded.slice(separator + 1);
+  return safeEqualString(user, DASHBOARD_AUTH_USER) && safeEqualString(password, DASHBOARD_PASSWORD);
+}
+
+function requireDashboardAuth(req, res) {
+  if (isLocalDashboardRequest(req)) return true;
+  if (!DASHBOARD_PASSWORD) {
+    res.writeHead(403, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+    res.end('Remote dashboard access is disabled until GAME_DASHBOARD_PASSWORD is configured.\n');
+    return false;
+  }
+  if (hasValidDashboardPassword(req)) return true;
+  res.writeHead(401, {
+    'www-authenticate': 'Basic realm="Game Dashboard", charset="UTF-8"',
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end('Password required for non-local dashboard access.\n');
+  return false;
+}
 
 const OBSTACLE_CATEGORIES = {
   normal: {
@@ -320,10 +379,10 @@ function normalizeOptions(input = {}) {
   const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 12)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const qualitySettings = {
-    '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 45, videoPreset: 'veryfast', label: '1080p Smooth · 45fps · fast encode' },
-    '1080p': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 45, videoPreset: 'veryfast', label: '1080p · 45fps · fast encode' },
-    '1440p': { width: 2560, height: 1440, crf: 20, captureScale: 1, fps: 45, videoPreset: 'faster', label: 'High 1440p · 45fps · faster encode' },
-    '4k': { width: 3840, height: 2160, crf: 20, captureScale: 1, fps: 45, videoPreset: 'faster', label: 'Ultra 4K · 45fps · faster encode' },
+    '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p Smooth · 60fps · fast encode' },
+    '1080p': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p · 60fps · fast encode' },
+    '1440p': { width: 2560, height: 1440, crf: 20, captureScale: 1, fps: 60, videoPreset: 'faster', label: 'High 1440p · 60fps · faster encode' },
+    '4k': { width: 3840, height: 2160, crf: 20, captureScale: 1, fps: 60, videoPreset: 'faster', label: 'Ultra 4K · 60fps · faster encode' },
   }[qualityPreset];
   const lengthMode = input.lengthMode === 'fixed-track' ? 'fixed-track' : 'target-duration';
   const targetMinutes = clampNumber(input.targetMinutes, 1, 120, CUP_VIDEO_DEFAULTS.targetMinutes);
@@ -333,8 +392,12 @@ function normalizeOptions(input = {}) {
     ? calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRaceCount })
     : manualTrackLength;
   const maxRaceSeconds = estimateMaxRaceSecondsForTrackLength(trackLength);
-  const width = Math.max(1280, Math.min(3840, Math.round(Number(input.width) || qualitySettings.width)));
-  const height = Math.max(720, Math.min(2160, Math.round(Number(input.height) || qualitySettings.height)));
+  const videoCanvasLayout = String(input.videoCanvasLayout || 'horizontal').toLowerCase() === 'vertical' ? 'vertical' : 'horizontal';
+  const defaultCanvasSize = videoCanvasLayout === 'vertical'
+    ? { width: 1080, height: 1920 }
+    : { width: qualitySettings.width, height: qualitySettings.height };
+  const width = Math.max(720, Math.min(3840, Math.round(Number(input.width) || defaultCanvasSize.width)));
+  const height = Math.max(720, Math.min(3840, Math.round(Number(input.height) || defaultCanvasSize.height)));
   const crf = Math.max(10, Math.min(24, Math.round(Number(input.crf) || qualitySettings.crf)));
   const captureScale = Math.max(1, Math.min(2, Number(input.captureScale) || qualitySettings.captureScale));
   const fps = Math.max(24, Math.min(120, Math.round(Number(input.fps) || qualitySettings.fps)));
@@ -347,6 +410,10 @@ function normalizeOptions(input = {}) {
     : Math.max(120, Math.min(7200, dynamicTimeout));
   const audio = input.audio !== false;
   const thumbnail = input.thumbnail !== false;
+  const uploadYoutube = input.uploadYoutube === true;
+  const youtubePrivacy = ['private', 'unlisted', 'public'].includes(String(input.youtubePrivacy || '').toLowerCase())
+    ? String(input.youtubePrivacy).toLowerCase()
+    : 'private';
   const estimatedOutputSeconds = estimateOutputVideoSeconds({ recordMode, raceCount, trackLength });
   const estimatedWallClockSeconds = estimateWallClockSeconds({
     recordMode,
@@ -355,7 +422,7 @@ function normalizeOptions(input = {}) {
     format,
     videoPreset,
     thumbnail,
-  });
+  }) + (uploadYoutube ? Math.ceil((estimatedOutputSeconds * 0.15) + 60) : 0);
   const thumbnailTitle = String(input.thumbnailTitle || '')
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -367,6 +434,7 @@ function normalizeOptions(input = {}) {
   return {
     recordMode,
     multipleRaceCount,
+    videoCanvasLayout,
     obstacleDistribution,
     cupName,
     density,
@@ -401,6 +469,8 @@ function normalizeOptions(input = {}) {
     stageTrackLabel: `Unified ${trackLength}m`,
     audio,
     thumbnail,
+    uploadYoutube,
+    youtubePrivacy,
     thumbnailTitle,
     ttsVoice,
     dryRun,
@@ -463,6 +533,22 @@ function publicJob(job) {
   const thumbnailExists = Boolean(thumbnail && existsSync(thumbnail));
   const youtubeMetadata = job.youtubeMetadata || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.youtube.json` : null);
   const youtubeMetadataExists = Boolean(youtubeMetadata && existsSync(youtubeMetadata));
+  const youtubeUpload = job.youtubeUpload || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.youtube-upload.json` : null);
+  const youtubeUploadExists = Boolean(youtubeUpload && existsSync(youtubeUpload));
+  let youtubeUploadInfo = null;
+  if (youtubeUploadExists) {
+    try {
+      const parsed = JSON.parse(readFileSync(youtubeUpload, 'utf8'));
+      youtubeUploadInfo = {
+        videoId: parsed.videoId || null,
+        url: parsed.url || null,
+        studioUrl: parsed.studioUrl || null,
+        privacyStatus: parsed.privacyStatus || null,
+        title: parsed.title || null,
+        dryRun: Boolean(parsed.dryRun),
+      };
+    } catch {}
+  }
   const renderLog = job.renderLog || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.render.log` : null);
   const renderLogExists = Boolean(renderLog && existsSync(renderLog));
   const size = outputExists ? statSync(job.output).size : 0;
@@ -486,6 +572,11 @@ function publicJob(job) {
     youtubeMetadataName: youtubeMetadata ? recordingDisplayName(youtubeMetadata) : null,
     youtubeMetadataExists,
     youtubeMetadataUrl: youtubeMetadataExists ? recordingUrl(youtubeMetadata) : null,
+    youtubeUpload,
+    youtubeUploadName: youtubeUpload ? recordingDisplayName(youtubeUpload) : null,
+    youtubeUploadExists,
+    youtubeUploadUrl: youtubeUploadExists ? recordingUrl(youtubeUpload) : null,
+    youtubeUploadInfo,
     renderLog,
     renderLogName: renderLog ? recordingDisplayName(renderLog) : null,
     renderLogExists,
@@ -537,6 +628,8 @@ function listRecordings() {
         thumbnailUrl: recordingUrl(thumbnailPath),
         youtubeMetadataExists: /\.(webm|mp4)$/i.test(name) && existsSync(youtubePath),
         youtubeMetadataUrl: recordingUrl(youtubePath),
+        youtubeUploadExists: /\.(webm|mp4)$/i.test(name) && existsSync(candidate('.youtube-upload.json')),
+        youtubeUploadUrl: recordingUrl(candidate('.youtube-upload.json')),
       };
     })
     .sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))
@@ -572,8 +665,9 @@ function normalizeThumbnailTestOptions(input = {}) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80) || 'CRAZY FIRST HIT';
+  const videoCanvasLayout = String(input.videoCanvasLayout || input.layout || '').toLowerCase() === 'vertical' ? 'vertical' : 'horizontal';
   const dryRun = input.dryRun === true || input.__dryRun === true;
-  return { videoName, title, dryRun };
+  return { videoName, title, videoCanvasLayout, dryRun };
 }
 
 function generateThumbnailTest(input = {}) {
@@ -603,8 +697,10 @@ function generateThumbnailTest(input = {}) {
     `--output=${thumbnailPath}`,
     `--metadata=${metadataPath}`,
     '--frame-strategy=mid-highlight',
-    '--safe-crop=composite-no-live-event',
+    `--safe-crop=${options.videoCanvasLayout === 'vertical' ? 'vertical-shorts-clean' : 'composite-no-live-event'}`,
     '--max-words=6',
+    `--width=${options.videoCanvasLayout === 'vertical' ? 1080 : 1280}`,
+    `--height=${options.videoCanvasLayout === 'vertical' ? 1920 : 720}`,
     `--title=${options.title}`,
     `--youtube-metadata-output=${youtubeMetadataPath}`,
   ];
@@ -616,6 +712,7 @@ function generateThumbnailTest(input = {}) {
       dryRun: true,
       videoName: options.videoName,
       title: options.title,
+      videoCanvasLayout: options.videoCanvasLayout,
       thumbnailName: recordingDisplayName(thumbnailPath),
       thumbnailUrl: recordingUrl(thumbnailPath),
       youtubeMetadataName: recordingDisplayName(youtubeMetadataPath),
@@ -633,6 +730,7 @@ function generateThumbnailTest(input = {}) {
     dryRun: false,
     videoName: options.videoName,
     title: options.title,
+    videoCanvasLayout: options.videoCanvasLayout,
     thumbnailName: recordingDisplayName(thumbnailPath),
     thumbnailUrl: recordingUrl(thumbnailPath),
     youtubeMetadataName: recordingDisplayName(youtubeMetadataPath),
@@ -654,6 +752,7 @@ function startRender(options) {
   const output = path.join(bundleDir, `${titleSlug}.output.${options.format}`);
   const thumbnail = path.join(bundleDir, `${titleSlug}.thumbnail.jpg`);
   const youtubeMetadata = path.join(bundleDir, `${titleSlug}.youtube.json`);
+  const youtubeUpload = path.join(bundleDir, `${titleSlug}.youtube-upload.json`);
   const renderLog = path.join(bundleDir, `${titleSlug}.log`);
   const renderPort = nextRenderPort++;
   const renderUrl = `http://127.0.0.1:${renderPort}`;
@@ -680,10 +779,13 @@ function startRender(options) {
     `--thumbnail=${options.thumbnail ? 'true' : 'false'}`,
     `--thumbnail-output=${thumbnail}`,
     `--youtube-metadata-output=${youtubeMetadata}`,
+    `--upload-youtube=${options.uploadYoutube ? 'true' : 'false'}`,
+    `--youtube-privacy=${options.youtubePrivacy}`,
+    `--youtube-upload-output=${youtubeUpload}`,
     `--video-capture=${options.videoCapture}`,
-    '--video-canvas=horizontal',
+    `--video-canvas=${options.videoCanvasLayout || 'horizontal'}`,
     '--thumbnail-frame-strategy=mid-highlight',
-    '--thumbnail-safe-crop=composite-no-live-event',
+    `--thumbnail-safe-crop=${options.videoCanvasLayout === 'vertical' ? 'vertical-shorts-clean' : 'composite-no-live-event'}`,
     '--thumbnail-max-words=6',
     `--port=${renderPort}`,
     `--url=${renderUrl}`,
@@ -709,6 +811,7 @@ function startRender(options) {
     outputTypeSlug: typeSlug,
     thumbnail,
     youtubeMetadata,
+    youtubeUpload,
     renderLog,
     renderPort,
     command: `${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`,
@@ -1126,10 +1229,17 @@ function dashboardHtml() {
           <div>
             <label for="qualityPreset">畫質</label>
             <select id="qualityPreset" name="qualityPreset">
-              <option value="1080p-smooth" selected>1080p Smooth（45fps）</option>
-              <option value="1080p">1080p（45fps）</option>
-              <option value="1440p">High 1440p（45fps）</option>
-              <option value="4k">Ultra 4K（45fps）</option>
+              <option value="1080p-smooth" selected>1080p Smooth（60fps）</option>
+              <option value="1080p">1080p（60fps）</option>
+              <option value="1440p">High 1440p（60fps）</option>
+              <option value="4k">Ultra 4K（60fps）</option>
+            </select>
+          </div>
+          <div>
+            <label for="videoCanvasLayout">影片畫面</label>
+            <select id="videoCanvasLayout" name="videoCanvasLayout">
+              <option value="horizontal" selected>Horizontal 16:9</option>
+              <option value="vertical">Vertical 9:16 Shorts</option>
             </select>
           </div>
           <div>
@@ -1162,6 +1272,15 @@ function dashboardHtml() {
           </div>
           <label class="check"><input id="audio" name="audio" type="checkbox" checked> <span>遊戲音訊</span></label>
           <label class="check thumbnail-toggle"><input id="thumbnail" name="thumbnail" type="checkbox" checked> <span>YouTube thumbnail 會自動生成</span></label>
+          <label class="check"><input id="uploadYoutube" name="uploadYoutube" type="checkbox"> <span>完成後上傳 YouTube（預設關閉；要公開前先用 Private/Unlisted 驗證）</span></label>
+          <div>
+            <label for="youtubePrivacy">YouTube privacy</label>
+            <select id="youtubePrivacy" name="youtubePrivacy">
+              <option value="private" selected>Private（safe test）</option>
+              <option value="unlisted">Unlisted</option>
+              <option value="public">Public（確認後先好用）</option>
+            </select>
+          </div>
           <div class="wide thumbnail-panel" data-dashboard-section="thumbnail-controls">
             <label for="thumbnailTitle">Thumbnail 大字 override（留空＝按 event 自動揀近期不重覆標題）</label>
             <div class="title-row">
@@ -1170,7 +1289,7 @@ function dashboardHtml() {
               <button id="testThumbnailBtn" class="secondary" type="button">Test latest thumbnail</button>
             </div>
             <datalist id="thumbnailTitlePresets">${thumbnailTitleOptions}</datalist>
-            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。留空 Thumbnail 大字時，由 render 根據 event 自動選近期不重覆標題。</p>
+            <p class="muted">預設會輸出 MP4，並同時產生 comparison WebM；thumbnail 預設開啟。留空 Thumbnail 大字時，由 render 根據 event 自動選近期不重覆標題。YouTube upload 預設關閉；如果要測試上傳，先用 Private/Unlisted，確認 metadata/thumbnail 無誤後才改 Public。</p>
           </div>
         </div>
 
@@ -1383,11 +1502,12 @@ async function restartDashboard() {
 }
 async function testGenerateThumbnail(videoName = '') {
   const title = form.thumbnailTitle?.value || 'CRAZY FIRST HIT';
+  const videoCanvasLayout = form.videoCanvasLayout?.value || 'horizontal';
   logEl.textContent = '生成測試 thumbnail 中...';
   const res = await fetch('/api/thumbnail/test', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ videoName, title }),
+    body: JSON.stringify({ videoName, title, videoCanvasLayout }),
   });
   const data = await res.json();
   if (!data.ok) {
@@ -1415,7 +1535,9 @@ function renderJob(job) {
   ).join('');
   jobMeta.innerHTML = 'Job #' + job.id + ' · ' + (job.outputName || '') + ' · ' + (job.size ? fmtBytes(job.size) : 'rendering...') + primaryLink + companionLinks +
     (job.thumbnailExists ? ' · <a href="' + job.thumbnailUrl + '" target="_blank">Thumbnail</a>' : '') +
-    (job.youtubeMetadataExists ? ' · <a href="' + job.youtubeMetadataUrl + '" target="_blank">YouTube JSON</a>' : '');
+    (job.youtubeMetadataExists ? ' · <a href="' + job.youtubeMetadataUrl + '" target="_blank">YouTube JSON</a>' : '') +
+    (job.youtubeUploadExists ? ' · <a href="' + job.youtubeUploadUrl + '" target="_blank">Upload JSON</a>' : '') +
+    (job.youtubeUploadInfo?.url ? ' · <a href="' + job.youtubeUploadInfo.url + '" target="_blank">YouTube video</a>' : '');
   jobPills.innerHTML = [
     'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : 'Cup Mode'),
     job.options.recordMode === 'continuous' ? 'Races: ' + (job.options.multipleRaceCount || 5) : null,
@@ -1430,6 +1552,9 @@ function renderJob(job) {
     'Format: ' + job.options.format + (job.options.format === 'mp4' ? ' + comparison WebM' : ''),
     'Capture: ' + (job.options.videoCapture === 'playwright' ? 'Playwright viewport' : 'Canvas stream'),
     'Thumbnail: ' + (job.options.thumbnail ? 'on' : 'off'),
+    'YouTube upload: ' + (job.options.uploadYoutube ? 'on' : 'off'),
+    'Privacy: ' + (job.options.youtubePrivacy || 'public'),
+    job.youtubeUploadInfo?.url ? 'YouTube: ' + job.youtubeUploadInfo.url : null,
     job.options.thumbnailTitle ? 'Title: ' + job.options.thumbnailTitle : null,
     'Quality: ' + (job.options.qualityLabel || job.options.qualityPreset || (job.options.width + '×' + job.options.height)) + ' · ' + job.options.width + '×' + job.options.height + '@' + (job.options.fps || 60),
     'TTS: ' + (job.options.ttsVoice || 'Alex'),
@@ -1446,7 +1571,8 @@ async function refreshRecordings() {
     (rec.isThumbnail ? '<img class="thumb-preview" src="' + rec.url + '?v=' + encodeURIComponent(rec.modifiedAt) + '" alt="thumbnail preview">' : '') + '</div><div class="recording-actions">' +
     (rec.isVideo ? '<button class="secondary" type="button" data-thumb-video="' + rec.name.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">Test thumbnail</button>' : '') +
     (rec.thumbnailExists && rec.isVideo ? '<a href="' + rec.thumbnailUrl + '" target="_blank">thumbnail</a>' : '') +
-    (rec.youtubeMetadataExists && rec.isVideo ? '<a href="' + rec.youtubeMetadataUrl + '" target="_blank">YouTube JSON</a>' : '') + '</div></div>'
+    (rec.youtubeMetadataExists && rec.isVideo ? '<a href="' + rec.youtubeMetadataUrl + '" target="_blank">YouTube JSON</a>' : '') +
+    (rec.youtubeUploadExists && rec.isVideo ? '<a href="' + rec.youtubeUploadUrl + '" target="_blank">Upload JSON</a>' : '') + '</div></div>'
   ).join('') : '<p class="muted">暫無影片</p>';
   recEl.querySelectorAll('[data-thumb-video]').forEach((btn) => {
     btn.addEventListener('click', () => testGenerateThumbnail(btn.getAttribute('data-thumb-video') || ''));
@@ -1475,6 +1601,7 @@ form.addEventListener('submit', async (event) => {
     obstacleTypes: selectedTypes(),
     format: form.format.value,
     videoCapture: form.videoCapture?.value || 'canvas',
+    videoCanvasLayout: form.videoCanvasLayout?.value || 'horizontal',
     qualityPreset: form.qualityPreset.value,
     cupSize: normalizeCupSize(),
     lengthMode: form.lengthMode.value,
@@ -1483,6 +1610,8 @@ form.addEventListener('submit', async (event) => {
     timeout: Number(form.timeout.value),
     audio: form.audio.checked,
     thumbnail: form.thumbnail?.checked !== false,
+    uploadYoutube: form.uploadYoutube?.checked !== false,
+    youtubePrivacy: form.youtubePrivacy?.value || 'public',
     thumbnailTitle: form.thumbnailTitle?.value || '',
     ttsVoice: form.ttsVoice.value,
   };
@@ -1514,6 +1643,7 @@ setInterval(refreshGameServer, 3000);
 }
 
 async function handleRequest(req, res) {
+  if (!requireDashboardAuth(req, res)) return;
   const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
 
   if (req.method === 'GET' && url.pathname === '/') return htmlResponse(res, dashboardHtml());
@@ -1531,6 +1661,16 @@ async function handleRequest(req, res) {
         { value: 'playwright', label: 'Playwright viewport' },
       ],
       thumbnailTitlePresets: THUMBNAIL_TITLE_PRESETS,
+      youtubePrivacyModes: [
+        { value: 'private', label: 'Private', default: true },
+        { value: 'unlisted', label: 'Unlisted' },
+        { value: 'public', label: 'Public' },
+      ],
+      videoCanvasLayouts: [
+        { value: 'horizontal', label: 'Horizontal 16:9', default: true, youtubeKind: 'long', width: 1920, height: 1080 },
+        { value: 'vertical', label: 'Vertical 9:16 Shorts', youtubeKind: 'shorts', width: 1080, height: 1920 },
+      ],
+      defaults: { uploadYoutube: false, youtubePrivacy: 'private', videoCanvasLayout: 'horizontal' },
     });
   }
 
