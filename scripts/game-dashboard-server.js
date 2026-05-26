@@ -47,8 +47,26 @@ const recordingsDir = activeGame.recordingsDir;
 const ACTIVE_SERVER_HOST = activeGame.server.host;
 const ACTIVE_SERVER_PORT = activeGame.server.port;
 const ACTIVE_SERVER_URL = activeGame.server.url;
+const scheduleDataDir = path.join(dashboardRoot, 'data');
+const schedulePath = process.env.GAME_DASHBOARD_SCHEDULE_PATH || path.join(scheduleDataDir, 'schedule.json');
+const scheduleRunStatePath = process.env.GAME_DASHBOARD_SCHEDULE_RUN_STATE_PATH || path.join(scheduleDataDir, 'schedule-runs.json');
+const SCHEDULE_WORKER_INTERVAL_MS = Math.max(60_000, Number(process.env.GAME_DASHBOARD_SCHEDULE_INTERVAL_MS || 5 * 60_000));
+const SCHEDULE_WEEKDAYS = [
+  { value: 1, key: 'mon', label: 'Mon', zh: '星期一' },
+  { value: 2, key: 'tue', label: 'Tue', zh: '星期二' },
+  { value: 3, key: 'wed', label: 'Wed', zh: '星期三' },
+  { value: 4, key: 'thu', label: 'Thu', zh: '星期四' },
+  { value: 5, key: 'fri', label: 'Fri', zh: '星期五' },
+  { value: 6, key: 'sat', label: 'Sat', zh: '星期六' },
+  { value: 0, key: 'sun', label: 'Sun', zh: '星期日' },
+];
+const SCHEDULE_RECURRENCES = [
+  { value: 'weekly', label: 'Weekly', zh: '每週' },
+  { value: 'daily', label: 'Daily', zh: '每日' },
+];
 
 mkdirSync(recordingsDir, { recursive: true });
+mkdirSync(scheduleDataDir, { recursive: true });
 
 const LOCAL_DASHBOARD_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
@@ -143,6 +161,88 @@ const DENSITY_PRESETS = [
   { value: 'standard', label: 'Standard / 標準' },
   { value: 'many', label: 'Many / 多' },
   { value: 'extreme', label: 'Extreme / 高密度' },
+];
+
+const SCHEDULE_ACTIONS = [
+  {
+    value: 'youtube-marble-long-video',
+    label: 'Youtube - Marble Long Video',
+    description: 'Generate and upload a 10-minute horizontal Marble Rush video.',
+    payload: {
+      game: 'marble-rush',
+      kind: 'youtube-upload',
+      titleHint: 'Marble Long Video',
+      dynamicAttributes: {
+        multipleRaceCount: { strategy: 'randomInt', min: 6, max: 10 },
+        obstacleTypes: { strategy: 'randomSample', count: 4, source: 'availableObstacleTypes' },
+      },
+      renderOptions: {
+        recordMode: 'continuous',
+        multipleRaceCount: { dynamic: 'randomInt', min: 6, max: 10 },
+        lengthMode: 'target-duration',
+        targetMinutes: 10,
+        targetSeconds: 600,
+        trackLength: 350,
+        stageTrackLabel: 'Unified 350m',
+        density: 'many',
+        obstacleDistribution: 'random',
+        obstacleTypes: { dynamic: 'randomSample', count: 4, source: 'availableObstacleTypes' },
+        format: 'mp4',
+        comparisonWebm: true,
+        videoCapture: 'canvas',
+        videoCanvasLayout: 'horizontal',
+        thumbnail: true,
+        uploadYoutube: true,
+        youtubePrivacy: 'public',
+        qualityPreset: '1080p-smooth',
+        qualityLabel: '1080p Smooth · 60fps · fast encode · 1920×1080@60',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        ttsVoice: 'Alex',
+        renderPort: 4300,
+      },
+    },
+  },
+  {
+    value: 'youtube-marble-short-video',
+    label: 'Youtube - Marble Short Video',
+    description: 'Generate and upload a 1-3 minute vertical Marble Rush short.',
+    payload: {
+      game: 'marble-rush',
+      kind: 'youtube-upload',
+      titleHint: 'Marble Short Video',
+      dynamicAttributes: {
+        trackLength: { strategy: 'randomInt', min: 300, max: 500, step: 10 },
+        obstacleTypes: { strategy: 'randomSample', count: 4, source: 'availableObstacleTypes' },
+      },
+      renderOptions: {
+        recordMode: 'continuous',
+        multipleRaceCount: 1,
+        lengthMode: 'target-duration',
+        targetMinutes: 3,
+        targetSeconds: 180,
+        trackLength: { dynamic: 'randomInt', min: 300, max: 500, step: 10 },
+        density: 'many',
+        obstacleDistribution: 'random',
+        obstacleTypes: { dynamic: 'randomSample', count: 4, source: 'availableObstacleTypes' },
+        format: 'mp4',
+        comparisonWebm: true,
+        videoCapture: 'canvas',
+        videoCanvasLayout: 'vertical',
+        thumbnail: true,
+        uploadYoutube: true,
+        youtubePrivacy: 'public',
+        qualityPreset: '1080p-smooth',
+        qualityLabel: '1080p Smooth · 60fps · fast encode · 1080×1920@60',
+        width: 1080,
+        height: 1920,
+        fps: 60,
+        ttsVoice: 'Alex',
+        renderPort: 4300,
+      },
+    },
+  },
 ];
 
 
@@ -296,6 +396,115 @@ function readRequestJson(req) {
     });
     req.on('error', reject);
   });
+}
+
+function defaultSchedule() {
+  return { version: 1, updatedAt: new Date().toISOString(), items: [] };
+}
+
+function normalizeScheduleTime(value = {}, fallback = { hour: 9, minute: 0 }) {
+  const rawHour = Number(value.hour ?? fallback.hour);
+  const rawMinute = Number(value.minute ?? fallback.minute);
+  const hour = Number.isFinite(rawHour) ? Math.max(0, Math.min(23, Math.round(rawHour))) : fallback.hour;
+  const minute = Number.isFinite(rawMinute) ? Math.max(0, Math.min(55, Math.round(rawMinute / 5) * 5)) : fallback.minute;
+  return { hour, minute };
+}
+
+function normalizeScheduleTimes(item = {}) {
+  const rawTimes = Array.isArray(item.times) ? item.times : [];
+  const sourceTimes = rawTimes.length ? rawTimes : [{ hour: item.hour, minute: item.minute }];
+  const seen = new Set();
+  const times = [];
+  for (const entry of sourceTimes) {
+    const time = normalizeScheduleTime(entry);
+    const key = `${time.hour}:${time.minute}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    times.push(time);
+  }
+  if (!times.length) times.push({ hour: 9, minute: 0 });
+  times.sort((a, b) => (a.hour - b.hour) || (a.minute - b.minute));
+  return times;
+}
+
+function schedulePrimaryTime(item = {}) {
+  const times = normalizeScheduleTimes(item);
+  return times[0] || { hour: 9, minute: 0 };
+}
+
+function normalizeScheduleItem(item = {}, index = 0) {
+  const id = String(item.id || `schedule-${Date.now()}-${index}-${crypto.randomBytes(3).toString('hex')}`).slice(0, 80);
+  const title = String(item.title || item.name || 'New item').trim().slice(0, 120) || 'New item';
+  const defaultAction = SCHEDULE_ACTIONS[0]?.value || 'youtube-marble-long-video';
+  const requestedAction = String(item.action || defaultAction).trim().slice(0, 80) || defaultAction;
+  const action = SCHEDULE_ACTIONS.some((entry) => entry.value === requestedAction) ? requestedAction : defaultAction;
+  const recurrence = SCHEDULE_RECURRENCES.some((entry) => entry.value === item.recurrence) ? item.recurrence : 'weekly';
+  const rawWeekday = Number(item.weekday ?? item.dayOfWeek ?? 1);
+  const weekdayValues = new Set(SCHEDULE_WEEKDAYS.map((day) => day.value));
+  const weekday = Number.isFinite(rawWeekday) && weekdayValues.has(Math.round(rawWeekday)) ? Math.round(rawWeekday) : 1;
+  const times = normalizeScheduleTimes(item);
+  const primaryTime = times[0] || { hour: 9, minute: 0 };
+  return {
+    id, title, action, recurrence, weekday, hour: primaryTime.hour, minute: primaryTime.minute, times,
+    enabled: item.enabled !== false,
+    notes: String(item.notes || '').slice(0, 500),
+    payload: item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload) ? item.payload : {},
+    createdAt: item.createdAt || new Date().toISOString(),
+    updatedAt: item.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeSchedule(value = {}) {
+  const items = Array.isArray(value.items) ? value.items.map(normalizeScheduleItem) : [];
+  items.sort((a, b) => {
+    const aTime = schedulePrimaryTime(a);
+    const bTime = schedulePrimaryTime(b);
+    return (a.recurrence === b.recurrence ? 0 : a.recurrence === 'daily' ? -1 : 1) || (a.weekday - b.weekday) || (aTime.hour - bTime.hour) || (aTime.minute - bTime.minute) || a.title.localeCompare(b.title);
+  });
+  return { version: 1, updatedAt: new Date().toISOString(), items };
+}
+
+function loadSchedule() {
+  if (!existsSync(schedulePath)) return defaultSchedule();
+  try { return normalizeSchedule(JSON.parse(readFileSync(schedulePath, 'utf8'))); }
+  catch (error) { return { ...defaultSchedule(), error: error.message }; }
+}
+
+function saveSchedule(schedule) {
+  const normalized = normalizeSchedule(schedule);
+  writeFileSync(schedulePath, `${JSON.stringify(normalized, null, 2)}
+`);
+  return normalized;
+}
+
+function defaultScheduleRunState() {
+  return { version: 1, updatedAt: new Date().toISOString(), lastRunByItem: {}, runs: [] };
+}
+
+function loadScheduleRunState() {
+  if (!existsSync(scheduleRunStatePath)) return defaultScheduleRunState();
+  try {
+    const parsed = JSON.parse(readFileSync(scheduleRunStatePath, 'utf8'));
+    return {
+      version: 1,
+      updatedAt: parsed.updatedAt || new Date().toISOString(),
+      lastRunByItem: parsed.lastRunByItem && typeof parsed.lastRunByItem === 'object' && !Array.isArray(parsed.lastRunByItem) ? parsed.lastRunByItem : {},
+      runs: Array.isArray(parsed.runs) ? parsed.runs.slice(-120) : [],
+    };
+  } catch (error) {
+    return { ...defaultScheduleRunState(), error: error.message };
+  }
+}
+
+function saveScheduleRunState(state) {
+  const normalized = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    lastRunByItem: state.lastRunByItem || {},
+    runs: Array.isArray(state.runs) ? state.runs.slice(-120) : [],
+  };
+  writeFileSync(scheduleRunStatePath, `${JSON.stringify(normalized, null, 2)}\n`);
+  return normalized;
 }
 
 function safeSlug(value, fallback = 'marble-cup') {
@@ -854,6 +1063,7 @@ function startRender(options) {
     job.status = code === 0 ? 'completed' : 'failed';
     if (code !== 0 && !job.error) job.error = `render exited with ${code ?? signal}`;
     appendFileSync(renderLog, `\n[dashboard] render job ${job.status} exit=${code ?? ''} signal=${signal ?? ''} finishedAt=${job.finishedAt}\n`);
+    updateScheduleRunForJob(job);
   });
 
   return job;
@@ -865,6 +1075,227 @@ function stopJob(job) {
   job.status = 'stopping';
   job.finishedAt = new Date().toISOString();
   return true;
+}
+
+const scheduleWorker = {
+  intervalMs: SCHEDULE_WORKER_INTERVAL_MS,
+  startedAt: null,
+  lastCheckedAt: null,
+  nextCheckAt: null,
+  lastResult: null,
+  running: false,
+  timer: null,
+};
+
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function scheduleSlotForDate(date = new Date()) {
+  const minute = Math.floor(date.getMinutes() / 5) * 5;
+  return {
+    dateKey: localDateKey(date),
+    weekday: date.getDay(),
+    hour: date.getHours(),
+    minute,
+    slotKey: `${localDateKey(date)}T${String(date.getHours()).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+  };
+}
+
+function scheduleItemDueInSlot(item, slot) {
+  if (!item.enabled) return false;
+  const matchesTime = normalizeScheduleTimes(item).some((time) => Number(time.hour) === slot.hour && Number(time.minute) === slot.minute);
+  if (!matchesTime) return false;
+  if (item.recurrence === 'daily') return true;
+  return Number(item.weekday) === Number(slot.weekday);
+}
+
+function scheduleRunKey(item, slot) {
+  return `${item.id}@${slot.slotKey}`;
+}
+
+function randomIntFromSpec(spec = {}) {
+  const min = Math.round(Number(spec.min ?? 0));
+  const max = Math.round(Number(spec.max ?? min));
+  const step = Math.max(1, Math.round(Number(spec.step || 1)));
+  const lo = Math.min(min, max);
+  const hi = Math.max(min, max);
+  const count = Math.floor((hi - lo) / step) + 1;
+  return lo + (Math.floor(Math.random() * count) * step);
+}
+
+function randomSampleFromSpec(spec = {}) {
+  const source = spec.source === 'availableObstacleTypes' ? OBSTACLE_TYPES.map((item) => item.value) : Array.isArray(spec.values) ? spec.values : [];
+  const pool = [...new Set(source)].filter(Boolean);
+  const count = Math.max(0, Math.min(pool.length, Math.round(Number(spec.count ?? pool.length))));
+  for (let index = pool.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(Math.random() * (index + 1));
+    [pool[index], pool[swap]] = [pool[swap], pool[index]];
+  }
+  return pool.slice(0, count);
+}
+
+function resolveScheduleDynamicValue(value) {
+  if (Array.isArray(value)) return value.map(resolveScheduleDynamicValue);
+  if (!value || typeof value !== 'object') return value;
+  const strategy = value.strategy || value.dynamic;
+  if (strategy === 'randomInt') return randomIntFromSpec(value);
+  if (strategy === 'randomSample') return randomSampleFromSpec(value);
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, resolveScheduleDynamicValue(entry)]));
+}
+
+function resolveSchedulePayload(payload = {}) {
+  return resolveScheduleDynamicValue(JSON.parse(JSON.stringify(payload || {})));
+}
+
+function appendScheduleRun(entry) {
+  const state = loadScheduleRunState();
+  const runs = Array.isArray(state.runs) ? state.runs : [];
+  runs.push(entry);
+  state.runs = runs.slice(-120);
+  if (entry.runKey) state.lastRunByItem[entry.itemId] = entry.runKey;
+  return saveScheduleRunState(state);
+}
+
+function latestScheduleRunsByItem(runs = []) {
+  const latest = {};
+  for (const run of runs) {
+    if (!run?.itemId) continue;
+    const current = latest[run.itemId];
+    const runTime = Date.parse(run.finishedAt || run.checkedAt || 0);
+    const currentTime = Date.parse(current?.finishedAt || current?.checkedAt || 0);
+    if (!current || runTime >= currentTime) latest[run.itemId] = run;
+  }
+  return latest;
+}
+
+function updateScheduleRunForJob(job) {
+  const source = job?.options?.scheduleSource;
+  if (!source?.runId) return null;
+  const state = loadScheduleRunState();
+  const runs = Array.isArray(state.runs) ? state.runs : [];
+  const index = runs.findIndex((run) => run.id === source.runId || (run.jobId === job.id && run.runKey === source.runKey));
+  if (index < 0) return null;
+  runs[index] = {
+    ...runs[index],
+    status: job.status === 'completed' ? 'completed' : 'failed',
+    finishedAt: job.finishedAt || new Date().toISOString(),
+    exitCode: job.exitCode,
+    signal: job.signal,
+    error: job.error || null,
+    outputName: job.output ? recordingDisplayName(job.output) : null,
+  };
+  state.runs = runs;
+  return saveScheduleRunState(state);
+}
+
+function publicScheduleWorkerStatus() {
+  const state = loadScheduleRunState();
+  return {
+    running: Boolean(scheduleWorker.timer),
+    busy: scheduleWorker.running,
+    intervalMs: scheduleWorker.intervalMs,
+    intervalMinutes: Math.round(scheduleWorker.intervalMs / 60000),
+    startedAt: scheduleWorker.startedAt,
+    lastCheckedAt: scheduleWorker.lastCheckedAt,
+    nextCheckAt: scheduleWorker.nextCheckAt,
+    lastResult: scheduleWorker.lastResult,
+    runStatePath: scheduleRunStatePath,
+    recentRuns: (state.runs || []).slice(-20).reverse(),
+    latestRunByItem: latestScheduleRunsByItem(state.runs || []),
+  };
+}
+
+function findRunningRenderJob() {
+  return Array.from(jobs.values()).find((job) => job.status === 'running' || job.status === 'stopping');
+}
+
+function executeScheduleAction(item, slot, { dryRun = false } = {}) {
+  const actionDefinition = SCHEDULE_ACTIONS.find((entry) => entry.value === item.action);
+  const mergedPayload = {
+    ...(actionDefinition?.payload || {}),
+    ...(item.payload || {}),
+    renderOptions: {
+      ...(actionDefinition?.payload?.renderOptions || {}),
+      ...(item.payload?.renderOptions || {}),
+    },
+  };
+  const payload = resolveSchedulePayload(mergedPayload);
+  const runKey = scheduleRunKey(item, slot);
+  const baseEntry = {
+    id: `schedule-run-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    itemId: item.id,
+    title: item.title,
+    action: item.action,
+    runKey,
+    slot: { ...slot },
+    checkedAt: new Date().toISOString(),
+    dryRun,
+  };
+
+  if (!actionDefinition) {
+    return { ...baseEntry, status: 'failed', error: `unknown schedule action: ${item.action}` };
+  }
+  if (payload.kind !== 'youtube-upload') {
+    return { ...baseEntry, status: 'failed', error: `unsupported schedule payload kind: ${payload.kind || 'none'}` };
+  }
+
+  const running = findRunningRenderJob();
+  if (running) {
+    return { ...baseEntry, status: 'skipped', reason: `render job ${running.id} is already ${running.status}` };
+  }
+
+  const options = normalizeOptions({ ...(payload.renderOptions || {}), dryRun });
+  options.scheduleSource = { itemId: item.id, title: item.title, action: item.action, runKey, runId: baseEntry.id, checkedAt: baseEntry.checkedAt };
+  const job = startRender(options);
+  return { ...baseEntry, status: dryRun ? 'dry-run' : 'started', jobId: job.id, renderOptions: options, command: job.command };
+}
+
+function runScheduleCheck({ dryRun = false, now = new Date() } = {}) {
+  const slot = scheduleSlotForDate(now);
+  const schedule = loadSchedule();
+  const state = loadScheduleRunState();
+  const dueItems = (schedule.items || []).filter((item) => scheduleItemDueInSlot(item, slot));
+  const results = [];
+  for (const item of dueItems) {
+    const runKey = scheduleRunKey(item, slot);
+    if (!dryRun && state.lastRunByItem?.[item.id] === runKey) {
+      results.push({ itemId: item.id, title: item.title, action: item.action, runKey, status: 'already-ran', slot });
+      continue;
+    }
+    const result = executeScheduleAction(item, slot, { dryRun });
+    results.push(result);
+    if (!dryRun && ['started', 'skipped', 'failed'].includes(result.status)) {
+      appendScheduleRun(result);
+      state.lastRunByItem[item.id] = runKey;
+    }
+  }
+  scheduleWorker.lastCheckedAt = new Date().toISOString();
+  scheduleWorker.lastResult = { slot, dueCount: dueItems.length, results };
+  return scheduleWorker.lastResult;
+}
+
+function scheduleNextWorkerCheck(delayMs = scheduleWorker.intervalMs) {
+  if (scheduleWorker.timer) clearTimeout(scheduleWorker.timer);
+  scheduleWorker.nextCheckAt = new Date(Date.now() + delayMs).toISOString();
+  scheduleWorker.timer = setTimeout(async () => {
+    scheduleWorker.running = true;
+    try { runScheduleCheck(); }
+    catch (error) { scheduleWorker.lastResult = { error: error.message, checkedAt: new Date().toISOString() }; }
+    finally {
+      scheduleWorker.running = false;
+      scheduleNextWorkerCheck(scheduleWorker.intervalMs);
+    }
+  }, delayMs);
+  scheduleWorker.timer.unref?.();
+}
+
+function startScheduleWorker() {
+  scheduleWorker.startedAt = new Date().toISOString();
+  scheduleNextWorkerCheck(5_000);
 }
 
 const gameServer = {
@@ -1156,6 +1587,47 @@ function dashboardHtml() {
     .record-mode-extra .muted { padding-bottom: 8px; }
     details { border-radius: 14px; background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.075); padding: 9px; }
     summary { cursor: pointer; font-weight: 900; font-size: 12px; color: #eaf1ff; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+    .tab-btn { color: #f4f7fb; background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.13); }
+    .tab-btn.active { color: #06101c; background: linear-gradient(135deg, #8ef4ff, #b49cff); }
+    .tab-panel[hidden] { display: none !important; }
+    .schedule-layout { display: grid; grid-template-columns: minmax(520px, 1fr) 340px; gap: 12px; align-items: start; }
+    .schedule-week-tabs { position: sticky; top: 64px; z-index: 4; display: flex; gap: 7px; flex-wrap: wrap; margin: 10px 0; padding: 8px 0; border-radius: 14px; background: rgba(12,18,32,.94); backdrop-filter: blur(14px); }
+    .schedule-day-btn { color: #f4f7fb; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); padding: 8px 10px; }
+    .schedule-day-btn.active { color: #06101c; background: linear-gradient(135deg, #8ef4ff, #b49cff); }
+    .schedule-grid { display: grid; gap: 7px; }
+    .schedule-hour { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; align-items: stretch; }
+    .schedule-time { color: #dce7fb; font-weight: 900; padding-top: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+    .schedule-hour.current-hour .schedule-time { color: #8ef4ff; text-shadow: 0 0 12px rgba(142,244,255,.45); }
+    .schedule-hour.current-hour .schedule-slot { border-color: rgba(142,244,255,.55); box-shadow: inset 0 0 0 1px rgba(142,244,255,.22); }
+    .schedule-slot { min-height: 42px; border: 1px solid rgba(255,255,255,.08); border-radius: 13px; background: rgba(255,255,255,.045); padding: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+    .schedule-item { display: inline-grid; gap: 2px; min-width: 172px; max-width: 100%; border-radius: 12px; padding: 7px 9px; background: rgba(148,163,184,.12); border: 1px solid rgba(148,163,184,.32); color: #f4f7fb; text-align: left; }
+    .schedule-item.disabled { opacity: .52; filter: grayscale(.35); }
+    .schedule-item.never-run { background: rgba(148,163,184,.12); border-color: rgba(148,163,184,.36); }
+    .schedule-item.started, .schedule-item.dry-run { background: rgba(56,189,248,.13); border-color: rgba(56,189,248,.52); }
+    .schedule-item.completed { background: rgba(52,211,153,.14); border-color: rgba(52,211,153,.58); }
+    .schedule-item.skipped, .schedule-item.already-ran { background: rgba(250,204,21,.13); border-color: rgba(250,204,21,.54); }
+    .schedule-item.failed { background: rgba(251,113,133,.16); border-color: rgba(251,113,133,.68); }
+    .schedule-item b { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .schedule-item span, .schedule-run-status { color: var(--muted); font-size: 11px; }
+    .schedule-run-status { display: inline-flex; align-items: center; gap: 4px; font-weight: 900; }
+    .run-dot { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; display: inline-block; }
+    .run-dot.started, .run-dot.dry-run { background: #38bdf8; box-shadow: 0 0 10px #38bdf8; }
+    .run-dot.completed { background: #34d399; box-shadow: 0 0 10px #34d399; }
+    .run-dot.skipped, .run-dot.already-ran { background: #facc15; box-shadow: 0 0 10px #facc15; }
+    .run-dot.failed { background: #fb7185; box-shadow: 0 0 10px #fb7185; }
+    .schedule-log-list { display: grid; gap: 6px; margin-top: 8px; }
+    .schedule-log-entry { border: 1px solid rgba(255,255,255,.09); border-left-width: 4px; border-radius: 12px; padding: 7px 9px; background: rgba(255,255,255,.045); font-size: 12px; }
+    .schedule-log-entry.completed { border-left-color: #34d399; }
+    .schedule-log-entry.started, .schedule-log-entry.dry-run { border-left-color: #38bdf8; }
+    .schedule-log-entry.skipped, .schedule-log-entry.already-ran { border-left-color: #facc15; }
+    .schedule-log-entry.failed { border-left-color: #fb7185; }
+    .schedule-log-entry b { display: block; margin-bottom: 2px; }
+    .schedule-log-entry span { color: var(--muted); }
+    .schedule-form { position: sticky; top: 82px; }
+    textarea { width: 100%; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; padding: 9px 10px; background: rgba(255,255,255,.08); color: #fff; outline: none; font: inherit; min-height: 76px; resize: vertical; }
+    .schedule-empty { color: var(--muted); font-size: 12px; padding: 7px; }
+    @media (max-width: 980px) { .schedule-layout { grid-template-columns: 1fr; } .schedule-form { position: static; } }
     @media (max-width: 760px) { .record-mode-grid, .record-mode-extra { grid-template-columns: 1fr; } }
     @media (max-width: 1180px) { .shell { grid-template-columns: 260px 1fr; } .right-pane { grid-column: 1 / -1; } }
     @media (max-width: 760px) { main { padding: 10px; } .topbar { grid-template-columns: 1fr; margin: -10px -10px 10px; } .shell, .form-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .checks { grid-template-columns: 1fr; } }
@@ -1172,7 +1644,12 @@ function dashboardHtml() {
       <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Idle</span></div>
     </section>
 
-    <section class="shell">
+    <nav class="tabs" aria-label="Dashboard tabs">
+      <button class="tab-btn active" type="button" data-tab-target="renderTab">Render</button>
+      <button class="tab-btn" type="button" data-tab-target="scheduleTab">Schedule</button>
+    </nav>
+
+    <section id="renderTab" class="tab-panel shell">
       <aside class="stack">
         <section class="card">
           <div class="card-head"><h2>Games</h2><span class="muted">${games.length} configured</span></div>
@@ -1340,6 +1817,43 @@ function dashboardHtml() {
         </section>
       </aside>
     </section>
+
+    <section id="scheduleTab" class="tab-panel" hidden>
+      <div class="schedule-layout">
+        <section class="card">
+          <div class="card-head"><h2>Hourly Schedule</h2><span id="scheduleStatus" class="muted">Loading...</span></div>
+          <p class="sub">每日 / 每週 + 小時計時間表。背景 worker 每 5 分鐘讀取 due items，根據 action/payload 觸發相應動作；同一個 5 分鐘 slot 只會執行一次。</p>
+          <div class="card" style="margin:10px 0;padding:10px;background:rgba(255,255,255,.045)">
+            <div class="card-head"><h2>Schedule Worker</h2><span id="scheduleWorkerStatus" class="muted">Checking...</span></div>
+            <div id="scheduleWorkerMeta" class="muted">每 5 分鐘自動檢查</div>
+            <div class="actions" style="margin-top:8px"><button id="scheduleWorkerCheckBtn" class="secondary" type="button">Check now (dry-run)</button></div>
+          </div>
+          <div id="scheduleWeekTabs" class="schedule-week-tabs" aria-label="schedule weekdays"></div>
+          <div id="scheduleGrid" class="schedule-grid" aria-label="hourly schedule"></div>
+        </section>
+        <form id="scheduleForm" class="card schedule-form">
+          <div class="card-head"><h2 id="scheduleFormTitle">Add item</h2><button id="scheduleNewBtn" class="secondary" type="button">New</button></div>
+          <input id="scheduleItemId" type="hidden" value="">
+          <label for="scheduleTitle">項目名稱</label>
+          <input id="scheduleTitle" type="text" maxlength="120" placeholder="例如：Render Marble Rush" required>
+          <div class="form-grid">
+            <div><label for="scheduleRecurrence">重複</label><select id="scheduleRecurrence">${SCHEDULE_RECURRENCES.map((entry) => `<option value="${entry.value}">${entry.zh} / ${entry.label}</option>`).join('')}</select></div>
+            <div><label for="scheduleWeekday">星期（每週用）</label><select id="scheduleWeekday">${SCHEDULE_WEEKDAYS.map((day) => `<option value="${day.value}">${day.zh} / ${day.label}</option>`).join('')}</select></div>
+          </div>
+          <div class="form-grid">
+            <div class="wide"><label for="scheduleTimes">執行時間</label><input id="scheduleTimes" type="text" value="09:00" placeholder="例如：09:00, 12:00, 18:30"><span class="muted">可輸入多個時間；分鐘會對齊 5 分鐘 slot。</span></div>
+            <div class="wide"><label for="scheduleAction">Action key</label><select id="scheduleAction">${SCHEDULE_ACTIONS.map((action) => `<option value="${action.value}">${action.label}</option>`).join('')}</select></div>
+          </div>
+          <label class="check"><input id="scheduleEnabled" type="checkbox" checked> <span>Enabled</span></label>
+          <label for="schedulePayload">Payload JSON（比之後 background job 用）</label>
+          <textarea id="schedulePayload" spellcheck="false" placeholder='{"game":"marble-rush"}'></textarea>
+          <label for="scheduleNotes">備註</label>
+          <textarea id="scheduleNotes" placeholder="可寫低執行細節或提醒"></textarea>
+          <div class="actions"><button id="scheduleSaveBtn" type="submit">Save item</button><button id="scheduleDeleteBtn" class="danger" type="button" disabled>Delete</button></div>
+          <pre id="scheduleLog" class="mini-log">等待 schedule...</pre>
+        </form>
+      </div>
+    </section>
   </main>
 
 <script>
@@ -1371,6 +1885,32 @@ const lengthModeInput = document.querySelector('#lengthMode');
 const targetMinutesInput = document.querySelector('#targetMinutes');
 const trackLengthInput = document.querySelector('#trackLength');
 const dashboardThumbnailPresetTitles = ${JSON.stringify(THUMBNAIL_TITLE_PRESETS)};
+const scheduleWeekdays = ${JSON.stringify(SCHEDULE_WEEKDAYS)};
+const scheduleRecurrences = ${JSON.stringify(SCHEDULE_RECURRENCES)};
+const scheduleActions = ${JSON.stringify(SCHEDULE_ACTIONS)};
+const scheduleGrid = document.querySelector('#scheduleGrid');
+const scheduleWeekTabs = document.querySelector('#scheduleWeekTabs');
+const scheduleStatus = document.querySelector('#scheduleStatus');
+const scheduleForm = document.querySelector('#scheduleForm');
+const scheduleFormTitle = document.querySelector('#scheduleFormTitle');
+const scheduleItemId = document.querySelector('#scheduleItemId');
+const scheduleTitle = document.querySelector('#scheduleTitle');
+const scheduleWeekday = document.querySelector('#scheduleWeekday');
+const scheduleRecurrence = document.querySelector('#scheduleRecurrence');
+const scheduleTimes = document.querySelector('#scheduleTimes');
+const scheduleAction = document.querySelector('#scheduleAction');
+const scheduleEnabled = document.querySelector('#scheduleEnabled');
+const schedulePayload = document.querySelector('#schedulePayload');
+const scheduleNotes = document.querySelector('#scheduleNotes');
+const scheduleNewBtn = document.querySelector('#scheduleNewBtn');
+const scheduleDeleteBtn = document.querySelector('#scheduleDeleteBtn');
+const scheduleLog = document.querySelector('#scheduleLog');
+const scheduleWorkerStatus = document.querySelector('#scheduleWorkerStatus');
+const scheduleWorkerMeta = document.querySelector('#scheduleWorkerMeta');
+const scheduleWorkerCheckBtn = document.querySelector('#scheduleWorkerCheckBtn');
+let dashboardSchedule = { items: [] };
+let activeScheduleWeekday = new Date().getDay();
+let shouldAutoScrollScheduleToNow = false;
 const recordModeHints = {
   single: 'Single: in-game recording only; use Marble Rush page for manual Single capture.',
   continuous: 'Multiple: background record repeated single races; 場數由 Multiple 場數控制。',
@@ -1442,6 +1982,295 @@ targetMinutesInput?.addEventListener('input', updateLengthModeState);
 document.querySelectorAll('input[name="recordMode"]').forEach((el) => el.addEventListener('change', updateLengthModeState));
 updateRecordModeHint();
 updateLengthModeState();
+
+function pad2(value) { return String(value).padStart(2, '0'); }
+function scheduleDayLabel(value) {
+  const day = scheduleWeekdays.find((entry) => Number(entry.value) === Number(value));
+  return day ? day.label : 'Day';
+}
+function scheduleDayZh(value) {
+  const day = scheduleWeekdays.find((entry) => Number(entry.value) === Number(value));
+  return day ? day.zh : '星期';
+}
+function scheduleRecurrenceLabel(value) {
+  const recurrence = scheduleRecurrences.find((entry) => entry.value === value);
+  return recurrence ? recurrence.zh : '每週';
+}
+function scheduleActionDefinition(value) {
+  return scheduleActions.find((entry) => entry.value === value) || scheduleActions[0];
+}
+function scheduleActionDefaultPayload(value) {
+  const definition = scheduleActionDefinition(value);
+  return definition && definition.payload ? JSON.parse(JSON.stringify(definition.payload)) : {};
+}
+function scheduleRunsOnDay(item, weekday) {
+  return item.recurrence === 'daily' || Number(item.weekday) === Number(weekday);
+}
+function normalizeScheduleTimeClient(value = {}) {
+  const rawHour = Number(value.hour);
+  const rawMinute = Number(value.minute);
+  const hour = Number.isFinite(rawHour) ? Math.max(0, Math.min(23, Math.round(rawHour))) : 9;
+  const minute = Number.isFinite(rawMinute) ? Math.max(0, Math.min(55, Math.round(rawMinute / 5) * 5)) : 0;
+  return { hour, minute };
+}
+function scheduleTimesForItem(item = {}) {
+  const sourceTimes = Array.isArray(item.times) && item.times.length ? item.times : [{ hour: item.hour, minute: item.minute }];
+  const seen = new Set();
+  const times = [];
+  sourceTimes.forEach((entry) => {
+    const time = normalizeScheduleTimeClient(entry);
+    const key = time.hour + ':' + time.minute;
+    if (seen.has(key)) return;
+    seen.add(key);
+    times.push(time);
+  });
+  if (!times.length) times.push({ hour: 9, minute: 0 });
+  return times.sort((a, b) => (a.hour - b.hour) || (a.minute - b.minute));
+}
+function formatScheduleTimes(times = []) {
+  return times.map((time) => pad2(time.hour) + ':' + pad2(time.minute)).join(', ');
+}
+function parseScheduleTimesInput(value) {
+  const parts = String(value || '').split(/[\\s,;]+/).map((entry) => entry.trim()).filter(Boolean);
+  const seen = new Set();
+  const times = [];
+  for (const part of parts) {
+    const match = part.match(/^(\\d{1,2})(?::(\\d{1,2}))?$/);
+    if (!match) throw new Error('時間格式錯誤：' + part + '（請用 09:00, 12:00）');
+    const hour = Number(match[1]);
+    const minute = Number(match[2] || 0);
+    if (!Number.isFinite(hour) || hour < 0 || hour > 23 || !Number.isFinite(minute) || minute < 0 || minute > 59) throw new Error('時間超出範圍：' + part);
+    const normalized = normalizeScheduleTimeClient({ hour, minute });
+    const key = normalized.hour + ':' + normalized.minute;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    times.push(normalized);
+  }
+  if (!times.length) throw new Error('請至少輸入一個執行時間');
+  return times.sort((a, b) => (a.hour - b.hour) || (a.minute - b.minute));
+}
+function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
+function currentScheduleDateParts() {
+  const now = new Date();
+  return { weekday: now.getDay(), hour: now.getHours(), minute: now.getMinutes() };
+}
+function setScheduleToToday({ scroll = false } = {}) {
+  const now = currentScheduleDateParts();
+  activeScheduleWeekday = now.weekday;
+  if (scheduleWeekday) scheduleWeekday.value = String(activeScheduleWeekday);
+  shouldAutoScrollScheduleToNow = Boolean(scroll);
+  return now;
+}
+function scrollScheduleToCurrentHour() {
+  if (!shouldAutoScrollScheduleToNow || !scheduleGrid || document.querySelector('#scheduleTab')?.hidden) return;
+  shouldAutoScrollScheduleToNow = false;
+  const now = currentScheduleDateParts();
+  const slot = scheduleGrid.querySelector('[data-hour="' + now.hour + '"]');
+  if (slot) slot.scrollIntoView({ block: 'center', behavior: 'auto' });
+}
+function setActiveTab(tabId) {
+  document.querySelectorAll('.tab-panel').forEach((panel) => { panel.hidden = panel.id !== tabId; });
+  document.querySelectorAll('.tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tabTarget === tabId));
+  if (tabId === 'scheduleTab') { setScheduleToToday({ scroll: true }); refreshSchedule(); refreshScheduleWorker(); }
+}
+document.querySelectorAll('.tab-btn').forEach((btn) => btn.addEventListener('click', () => setActiveTab(btn.dataset.tabTarget)));
+function renderScheduleWeekTabs() {
+  if (!scheduleWeekTabs) return;
+  const counts = new Map(scheduleWeekdays.map((day) => [day.value, 0]));
+  (dashboardSchedule.items || []).forEach((item) => {
+    if (item.recurrence === 'daily') scheduleWeekdays.forEach((day) => counts.set(day.value, (counts.get(day.value) || 0) + 1));
+    else counts.set(Number(item.weekday), (counts.get(Number(item.weekday)) || 0) + 1);
+  });
+  scheduleWeekTabs.innerHTML = scheduleWeekdays.map((day) => '<button class="schedule-day-btn ' + (Number(day.value) === Number(activeScheduleWeekday) ? 'active' : '') + '" type="button" data-schedule-weekday="' + day.value + '">' + day.zh + ' <span class="muted">' + (counts.get(day.value) || 0) + '</span></button>').join('');
+  scheduleWeekTabs.querySelectorAll('[data-schedule-weekday]').forEach((btn) => btn.addEventListener('click', () => {
+    activeScheduleWeekday = Number(btn.dataset.scheduleWeekday);
+    shouldAutoScrollScheduleToNow = false;
+    if (scheduleWeekday) scheduleWeekday.value = String(activeScheduleWeekday);
+    renderSchedule();
+  }));
+}
+function scheduleItemsForHour(hour) {
+  return (dashboardSchedule.items || [])
+    .filter((item) => scheduleRunsOnDay(item, activeScheduleWeekday) && scheduleTimesForItem(item).some((time) => Number(time.hour) === Number(hour)))
+    .sort((a, b) => {
+      const aTime = scheduleTimesForItem(a).find((time) => Number(time.hour) === Number(hour)) || scheduleTimesForItem(a)[0];
+      const bTime = scheduleTimesForItem(b).find((time) => Number(time.hour) === Number(hour)) || scheduleTimesForItem(b)[0];
+      return (aTime.minute - bTime.minute) || a.title.localeCompare(b.title);
+    });
+}
+function latestRunForScheduleItem(item) {
+  return dashboardSchedule.latestRunByItem?.[item.id] || null;
+}
+function scheduleRunStatusClass(run) {
+  return run?.status || 'never-run';
+}
+function scheduleRunStatusLabel(run) {
+  const status = run?.status || 'never-run';
+  return ({
+    'never-run': '未行',
+    started: '已觸發',
+    completed: '已完成',
+    failed: '有問題',
+    skipped: '已略過',
+    'already-ran': '已行過',
+    'dry-run': 'Dry-run',
+  })[status] || status;
+}
+function scheduleRunSummary(run) {
+  if (!run) return '未行 · no log yet';
+  const time = run.finishedAt || run.checkedAt || '';
+  const detail = run.jobId ? 'job #' + run.jobId : run.reason || run.error || '';
+  return scheduleRunStatusLabel(run) + (time ? ' · ' + time : '') + (detail ? ' · ' + detail : '');
+}
+function renderSchedule() {
+  if (!scheduleGrid) return;
+  renderScheduleWeekTabs();
+  scheduleGrid.setAttribute('aria-label', scheduleDayZh(activeScheduleWeekday) + ' hourly schedule');
+  scheduleGrid.innerHTML = Array.from({ length: 24 }, (_, hour) => {
+    const isCurrentHour = Number(activeScheduleWeekday) === Number(currentScheduleDateParts().weekday) && hour === currentScheduleDateParts().hour;
+    const items = scheduleItemsForHour(hour);
+    const body = items.length ? items.map((item) => {
+      const run = latestRunForScheduleItem(item);
+      const statusClass = scheduleRunStatusClass(run);
+      return '<button class="schedule-item ' + statusClass + ' ' + (item.enabled ? '' : 'disabled') + '" type="button" data-schedule-id="' + escapeHtml(item.id) + '"><b>' + escapeHtml(item.title) + '</b><span>' + scheduleRecurrenceLabel(item.recurrence) + (item.recurrence === 'daily' ? '' : ' · ' + scheduleDayLabel(item.weekday)) + ' · times ' + escapeHtml(formatScheduleTimes(scheduleTimesForItem(item))) + ' · ' + escapeHtml(item.action) + (item.enabled ? '' : ' · off') + '</span><span class="schedule-run-status"><i class="run-dot ' + statusClass + '"></i>' + escapeHtml(scheduleRunSummary(run)) + '</span></button>';
+    }).join('') : '<div class="schedule-empty">No items</div>';
+    return '<div class="schedule-hour ' + (isCurrentHour ? 'current-hour' : '') + '"><div class="schedule-time">' + pad2(hour) + ':00</div><div class="schedule-slot" data-weekday="' + activeScheduleWeekday + '" data-hour="' + hour + '">' + body + '</div></div>';
+  }).join('');
+  scheduleGrid.querySelectorAll('[data-schedule-id]').forEach((btn) => btn.addEventListener('click', () => editScheduleItem(btn.dataset.scheduleId)));
+  const now = currentScheduleDateParts();
+  const todaySuffix = Number(activeScheduleWeekday) === Number(now.weekday) ? ' · 今日 · now ' + pad2(now.hour) + ':' + pad2(now.minute) : '';
+  if (scheduleStatus) scheduleStatus.textContent = scheduleDayZh(activeScheduleWeekday) + todaySuffix + ' · ' + scheduleItemsForDay(activeScheduleWeekday).length + ' / ' + (dashboardSchedule.items || []).length + ' items';
+  setTimeout(scrollScheduleToCurrentHour, 50);
+}
+function scheduleItemsForDay(weekday) { return (dashboardSchedule.items || []).filter((item) => scheduleRunsOnDay(item, weekday)); }
+async function refreshSchedule() {
+  if (!scheduleGrid) return;
+  const res = await fetch('/api/schedule');
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'schedule load failed');
+  dashboardSchedule = data.schedule || { items: [] };
+  if (!document.querySelector('#scheduleTab')?.hidden) setScheduleToToday({ scroll: shouldAutoScrollScheduleToNow });
+  const workerData = await fetch('/api/schedule/worker').then((res) => res.json()).catch(() => null);
+  if (workerData?.ok) dashboardSchedule.latestRunByItem = workerData.worker.latestRunByItem || {};
+  renderSchedule();
+  if (scheduleLog) scheduleLog.textContent = 'Loaded from ' + (data.path || 'schedule store');
+  await refreshScheduleWorker({ preserveAutoScroll: true });
+}
+function formatScheduleRun(run) {
+  if (!run) return '';
+  const slot = run.slot?.slotKey || '';
+  const tail = run.jobId ? ' · job #' + run.jobId : run.reason ? ' · ' + run.reason : run.error ? ' · ' + run.error : '';
+  return '[' + scheduleRunStatusLabel(run) + '] ' + (run.title || run.itemId || 'item') + (slot ? ' @ ' + slot : '') + tail;
+}
+function renderScheduleRunLog(runs = []) {
+  if (!runs.length) return '<div class="muted">暫時未有 run log</div>';
+  return '<div class="schedule-log-list">' + runs.slice(0, 8).map((run) => {
+    const statusClass = scheduleRunStatusClass(run);
+    return '<div class="schedule-log-entry ' + statusClass + '"><b><span class="run-dot ' + statusClass + '"></span> ' + escapeHtml(scheduleRunStatusLabel(run)) + ' · ' + escapeHtml(run.title || run.itemId || 'item') + '</b><span>' + escapeHtml((run.slot?.slotKey || '') + (run.jobId ? ' · job #' + run.jobId : '') + (run.reason ? ' · ' + run.reason : '') + (run.error ? ' · ' + run.error : '') + (run.outputName ? ' · ' + run.outputName : '')) + '</span></div>';
+  }).join('') + '</div>';
+}
+function renderScheduleWorker(worker) {
+  if (!worker) return;
+  if (scheduleWorkerStatus) scheduleWorkerStatus.textContent = (worker.running ? 'Running' : 'Stopped') + ' · every ' + (worker.intervalMinutes || 5) + ' min';
+  if (scheduleWorkerMeta) {
+    dashboardSchedule.latestRunByItem = worker.latestRunByItem || dashboardSchedule.latestRunByItem || {};
+    scheduleWorkerMeta.innerHTML = [
+      'Last check: ' + (worker.lastCheckedAt || '未檢查'),
+      'Next: ' + (worker.nextCheckAt || 'pending'),
+      'Due last check: ' + (worker.lastResult?.dueCount ?? 0),
+      'Log file: ' + (worker.runStatePath || ''),
+    ].join(' · ') + renderScheduleRunLog(worker.recentRuns || []);
+    renderSchedule();
+  }
+}
+async function refreshScheduleWorker({ preserveAutoScroll = false } = {}) {
+  const keepAutoScroll = shouldAutoScrollScheduleToNow;
+  const res = await fetch('/api/schedule/worker');
+  const data = await res.json();
+  if (data.ok) {
+    if (preserveAutoScroll) shouldAutoScrollScheduleToNow = keepAutoScroll;
+    renderScheduleWorker(data.worker);
+  }
+}
+async function dryRunScheduleWorkerCheck() {
+  if (scheduleLog) scheduleLog.textContent = 'Checking due actions (dry-run)...';
+  const res = await fetch('/api/schedule/check?dryRun=true', { method: 'POST' });
+  const data = await res.json();
+  if (!data.ok) { if (scheduleLog) scheduleLog.textContent = data.error || 'Check failed'; return; }
+  if (scheduleLog) scheduleLog.textContent = 'Dry-run result:\\\\n' + JSON.stringify(data.result, null, 2);
+  await refreshScheduleWorker();
+}
+function resetScheduleForm(hour = 9) {
+  if (!scheduleForm) return;
+  scheduleFormTitle.textContent = 'Add item'; scheduleItemId.value = ''; scheduleTitle.value = '';
+  scheduleRecurrence.value = 'weekly'; scheduleWeekday.value = String(activeScheduleWeekday);
+  scheduleTimes.value = pad2(hour) + ':00'; scheduleAction.value = scheduleActions[0]?.value || 'youtube-marble-long-video'; scheduleEnabled.checked = true; updateScheduleRecurrenceState();
+  schedulePayload.value = ''; schedulePayload.dataset.actionPreset = ''; scheduleNotes.value = ''; scheduleDeleteBtn.disabled = true;
+  if (scheduleTitle) scheduleTitle.dataset.actionPreset = '';
+  applyScheduleActionPreset(true);
+}
+function editScheduleItem(id) {
+  const item = (dashboardSchedule.items || []).find((entry) => entry.id === id); if (!item) return;
+  activeScheduleWeekday = Number(item.weekday ?? 1);
+  scheduleFormTitle.textContent = 'Edit item'; scheduleItemId.value = item.id; scheduleTitle.value = item.title || '';
+  scheduleRecurrence.value = item.recurrence || 'weekly'; scheduleWeekday.value = String(item.weekday ?? 1); updateScheduleRecurrenceState();
+  scheduleTimes.value = formatScheduleTimes(scheduleTimesForItem(item)); scheduleAction.value = item.action || scheduleActions[0]?.value || 'youtube-marble-long-video';
+  scheduleEnabled.checked = item.enabled !== false; schedulePayload.value = item.payload && Object.keys(item.payload).length ? JSON.stringify(item.payload, null, 2) : ''; schedulePayload.dataset.actionPreset = item.action || '';
+  if (scheduleTitle) scheduleTitle.dataset.actionPreset = item.action || '';
+  scheduleNotes.value = item.notes || ''; scheduleDeleteBtn.disabled = false; renderSchedule(); scheduleTitle.focus();
+}
+async function saveScheduleItem(event) {
+  event.preventDefault();
+  let payload = {};
+  if (schedulePayload.value.trim()) { try { payload = JSON.parse(schedulePayload.value); } catch (error) { scheduleLog.textContent = 'Payload JSON error: ' + error.message; return; } }
+  let times = [];
+  try { times = parseScheduleTimesInput(scheduleTimes.value); } catch (error) { scheduleLog.textContent = error.message; return; }
+  const primaryTime = times[0] || { hour: 9, minute: 0 };
+  const now = new Date().toISOString();
+  const id = scheduleItemId.value || 'schedule-' + Date.now().toString(36);
+  const existing = (dashboardSchedule.items || []).find((item) => item.id === id);
+  const item = { id, title: scheduleTitle.value, recurrence: scheduleRecurrence.value, weekday: Number(scheduleWeekday.value), hour: primaryTime.hour, minute: primaryTime.minute, times, action: scheduleAction.value, enabled: scheduleEnabled.checked, payload, notes: scheduleNotes.value, createdAt: existing?.createdAt || now, updatedAt: now };
+  const items = (dashboardSchedule.items || []).filter((entry) => entry.id !== id).concat(item);
+  const res = await fetch('/api/schedule', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) });
+  const data = await res.json();
+  if (!data.ok) { scheduleLog.textContent = data.error || 'Save failed'; return; }
+  dashboardSchedule = data.schedule; activeScheduleWeekday = Number(item.weekday); renderSchedule(); editScheduleItem(id); scheduleLog.textContent = 'Saved ' + item.title + ' · ' + scheduleRecurrenceLabel(item.recurrence) + (item.recurrence === 'daily' ? '' : ' · ' + scheduleDayZh(item.weekday)) + ' · times ' + formatScheduleTimes(times) + ' · background jobs can read /api/schedule';
+}
+async function deleteScheduleItem() {
+  const id = scheduleItemId.value; if (!id) return;
+  const items = (dashboardSchedule.items || []).filter((entry) => entry.id !== id);
+  const res = await fetch('/api/schedule', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) });
+  const data = await res.json();
+  if (!data.ok) { scheduleLog.textContent = data.error || 'Delete failed'; return; }
+  dashboardSchedule = data.schedule; renderSchedule(); resetScheduleForm(); scheduleLog.textContent = 'Deleted item';
+}
+scheduleForm?.addEventListener('submit', saveScheduleItem);
+scheduleNewBtn?.addEventListener('click', () => resetScheduleForm());
+scheduleDeleteBtn?.addEventListener('click', deleteScheduleItem);
+scheduleWorkerCheckBtn?.addEventListener('click', dryRunScheduleWorkerCheck);
+function updateScheduleRecurrenceState() {
+  if (!scheduleRecurrence || !scheduleWeekday) return;
+  scheduleWeekday.disabled = scheduleRecurrence.value === 'daily';
+}
+function applyScheduleActionPreset(force = false) {
+  if (!scheduleAction || !schedulePayload) return;
+  const action = scheduleAction.value;
+  const defaultPayload = scheduleActionDefaultPayload(action);
+  const hasDefault = Object.keys(defaultPayload).length > 0;
+  const canReplace = force || !schedulePayload.value.trim() || Boolean(schedulePayload.dataset.actionPreset);
+  if (!hasDefault || !canReplace) return;
+  schedulePayload.value = JSON.stringify(defaultPayload, null, 2);
+  schedulePayload.dataset.actionPreset = action;
+  if (scheduleTitle && (!scheduleTitle.value.trim() || scheduleTitle.dataset.actionPreset)) {
+    scheduleTitle.value = scheduleActionDefinition(action)?.label || action;
+    scheduleTitle.dataset.actionPreset = action;
+  }
+}
+scheduleWeekday?.addEventListener('change', () => { activeScheduleWeekday = Number(scheduleWeekday.value); shouldAutoScrollScheduleToNow = false; renderSchedule(); });
+scheduleRecurrence?.addEventListener('change', updateScheduleRecurrenceState);
+scheduleAction?.addEventListener('change', () => applyScheduleActionPreset(false));
+setScheduleToToday({ scroll: false });
+resetScheduleForm(currentScheduleDateParts().hour);
 
 function fmtBytes(n) {
   if (!n) return '0 B';
@@ -1648,6 +2477,34 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/') return htmlResponse(res, dashboardHtml());
 
+  if (req.method === 'GET' && url.pathname === '/api/schedule') {
+    return jsonResponse(res, 200, { ok: true, schedule: loadSchedule(), path: schedulePath });
+  }
+
+  if (req.method === 'PUT' && url.pathname === '/api/schedule') {
+    try {
+      const body = await readRequestJson(req);
+      return jsonResponse(res, 200, { ok: true, schedule: saveSchedule(body), path: schedulePath });
+    } catch (error) {
+      return jsonResponse(res, 400, { ok: false, error: error.message });
+    }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/schedule/worker') {
+    return jsonResponse(res, 200, { ok: true, worker: publicScheduleWorkerStatus() });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/schedule/check') {
+    try {
+      const body = await readRequestJson(req);
+      const dryRun = body.dryRun === true || url.searchParams.get('dryRun') === 'true';
+      const result = runScheduleCheck({ dryRun });
+      return jsonResponse(res, 200, { ok: true, dryRun, result, worker: publicScheduleWorkerStatus() });
+    } catch (error) {
+      return jsonResponse(res, 400, { ok: false, error: error.message });
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/options') {
     return jsonResponse(res, 200, {
       ok: true,
@@ -1670,6 +2527,7 @@ async function handleRequest(req, res) {
         { value: 'horizontal', label: 'Horizontal 16:9', default: true, youtubeKind: 'long', width: 1920, height: 1080 },
         { value: 'vertical', label: 'Vertical 9:16 Shorts', youtubeKind: 'shorts', width: 1080, height: 1920 },
       ],
+      schedule: { endpoint: '/api/schedule', path: schedulePath, weekdays: SCHEDULE_WEEKDAYS, recurrences: SCHEDULE_RECURRENCES, actions: SCHEDULE_ACTIONS },
       defaults: { uploadYoutube: false, youtubePrivacy: 'private', videoCanvasLayout: 'horizontal' },
     });
   }
@@ -1770,6 +2628,8 @@ const server = http.createServer((req, res) => {
     jsonResponse(res, 500, { ok: false, error: error.message });
   });
 });
+
+startScheduleWorker();
 
 server.listen(PORT, HOST, () => {
   console.log(`[game-dashboard] http://${HOST}:${PORT}`);
