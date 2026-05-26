@@ -141,6 +141,7 @@ const OBSTACLE_CATEGORIES = {
 
 const OBSTACLE_TYPES = [
   { value: 'popBumper', label: 'Pop Bumper', category: 'normal' },
+  { value: 'pinBumper', label: 'Pin Bumper', category: 'normal' },
   { value: 'slingshot', label: 'Slingshot', category: 'normal' },
   { value: 'spinnerGate', label: 'Spinner Gate', category: 'normal' },
   { value: 'dropTarget', label: 'Drop Target', category: 'buff' },
@@ -1172,6 +1173,28 @@ function latestScheduleRunsByItem(runs = []) {
   return latest;
 }
 
+function scheduleRunTimeDisplayKey(run = {}) {
+  const slot = run.slot || {};
+  const weekday = Number(slot.weekday);
+  const hour = Number(slot.hour);
+  const minute = Number(slot.minute);
+  if (!run.itemId || !Number.isFinite(weekday) || !Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return `${run.itemId}@${weekday}@${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function latestScheduleRunsByItemTime(runs = []) {
+  const latest = {};
+  for (const run of runs) {
+    const key = scheduleRunTimeDisplayKey(run);
+    if (!key) continue;
+    const current = latest[key];
+    const runTime = Date.parse(run.finishedAt || run.checkedAt || 0);
+    const currentTime = Date.parse(current?.finishedAt || current?.checkedAt || 0);
+    if (!current || runTime >= currentTime) latest[key] = run;
+  }
+  return latest;
+}
+
 function updateScheduleRunForJob(job) {
   const source = job?.options?.scheduleSource;
   if (!source?.runId) return null;
@@ -1206,6 +1229,7 @@ function publicScheduleWorkerStatus() {
     runStatePath: scheduleRunStatePath,
     recentRuns: (state.runs || []).slice(-20).reverse(),
     latestRunByItem: latestScheduleRunsByItem(state.runs || []),
+    latestRunByItemTime: latestScheduleRunsByItemTime(state.runs || []),
   };
 }
 
@@ -2098,8 +2122,11 @@ function scheduleItemsForHour(hour) {
       return (aTime.minute - bTime.minute) || a.title.localeCompare(b.title);
     });
 }
-function latestRunForScheduleItem(item) {
-  return dashboardSchedule.latestRunByItem?.[item.id] || null;
+function scheduleTimeRunDisplayKey(item, time) {
+  return item.id + '@' + Number(activeScheduleWeekday) + '@' + pad2(time.hour) + ':' + pad2(time.minute);
+}
+function latestRunForScheduleItemTime(item, time) {
+  return dashboardSchedule.latestRunByItemTime?.[scheduleTimeRunDisplayKey(item, time)] || null;
 }
 function scheduleRunStatusClass(run) {
   return run?.status || 'never-run';
@@ -2129,10 +2156,14 @@ function renderSchedule() {
   scheduleGrid.innerHTML = Array.from({ length: 24 }, (_, hour) => {
     const isCurrentHour = Number(activeScheduleWeekday) === Number(currentScheduleDateParts().weekday) && hour === currentScheduleDateParts().hour;
     const items = scheduleItemsForHour(hour);
-    const body = items.length ? items.map((item) => {
-      const run = latestRunForScheduleItem(item);
-      const statusClass = scheduleRunStatusClass(run);
-      return '<button class="schedule-item ' + statusClass + ' ' + (item.enabled ? '' : 'disabled') + '" type="button" data-schedule-id="' + escapeHtml(item.id) + '"><b>' + escapeHtml(item.title) + '</b><span>' + scheduleRecurrenceLabel(item.recurrence) + (item.recurrence === 'daily' ? '' : ' · ' + scheduleDayLabel(item.weekday)) + ' · times ' + escapeHtml(formatScheduleTimes(scheduleTimesForItem(item))) + ' · ' + escapeHtml(item.action) + (item.enabled ? '' : ' · off') + '</span><span class="schedule-run-status"><i class="run-dot ' + statusClass + '"></i>' + escapeHtml(scheduleRunSummary(run)) + '</span></button>';
+    const body = items.length ? items.flatMap((item) => {
+      const timesInHour = scheduleTimesForItem(item).filter((time) => Number(time.hour) === Number(hour));
+      return timesInHour.map((time) => {
+        const run = latestRunForScheduleItemTime(item, time);
+        const statusClass = scheduleRunStatusClass(run);
+        const timeLabel = pad2(time.hour) + ':' + pad2(time.minute);
+        return '<button class="schedule-item ' + statusClass + ' ' + (item.enabled ? '' : 'disabled') + '" type="button" data-schedule-id="' + escapeHtml(item.id) + '" data-schedule-time="' + escapeHtml(timeLabel) + '"><b>' + escapeHtml(item.title) + ' <small>@ ' + escapeHtml(timeLabel) + '</small></b><span>' + scheduleRecurrenceLabel(item.recurrence) + (item.recurrence === 'daily' ? '' : ' · ' + scheduleDayLabel(item.weekday)) + ' · slot ' + escapeHtml(timeLabel) + ' / all times ' + escapeHtml(formatScheduleTimes(scheduleTimesForItem(item))) + ' · ' + escapeHtml(item.action) + (item.enabled ? '' : ' · off') + '</span><span class="schedule-run-status"><i class="run-dot ' + statusClass + '"></i>' + escapeHtml(scheduleRunSummary(run)) + '</span></button>';
+      });
     }).join('') : '<div class="schedule-empty">No items</div>';
     return '<div class="schedule-hour ' + (isCurrentHour ? 'current-hour' : '') + '"><div class="schedule-time">' + pad2(hour) + ':00</div><div class="schedule-slot" data-weekday="' + activeScheduleWeekday + '" data-hour="' + hour + '">' + body + '</div></div>';
   }).join('');
@@ -2151,7 +2182,10 @@ async function refreshSchedule() {
   dashboardSchedule = data.schedule || { items: [] };
   if (!document.querySelector('#scheduleTab')?.hidden) setScheduleToToday({ scroll: shouldAutoScrollScheduleToNow });
   const workerData = await fetch('/api/schedule/worker').then((res) => res.json()).catch(() => null);
-  if (workerData?.ok) dashboardSchedule.latestRunByItem = workerData.worker.latestRunByItem || {};
+  if (workerData?.ok) {
+    dashboardSchedule.latestRunByItem = workerData.worker.latestRunByItem || {};
+    dashboardSchedule.latestRunByItemTime = workerData.worker.latestRunByItemTime || {};
+  }
   renderSchedule();
   if (scheduleLog) scheduleLog.textContent = 'Loaded from ' + (data.path || 'schedule store');
   await refreshScheduleWorker({ preserveAutoScroll: true });
@@ -2174,6 +2208,7 @@ function renderScheduleWorker(worker) {
   if (scheduleWorkerStatus) scheduleWorkerStatus.textContent = (worker.running ? 'Running' : 'Stopped') + ' · every ' + (worker.intervalMinutes || 5) + ' min';
   if (scheduleWorkerMeta) {
     dashboardSchedule.latestRunByItem = worker.latestRunByItem || dashboardSchedule.latestRunByItem || {};
+    dashboardSchedule.latestRunByItemTime = worker.latestRunByItemTime || dashboardSchedule.latestRunByItemTime || {};
     scheduleWorkerMeta.innerHTML = [
       'Last check: ' + (worker.lastCheckedAt || '未檢查'),
       'Next: ' + (worker.nextCheckAt || 'pending'),
