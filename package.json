@@ -4,8 +4,9 @@
   "description": "Standalone multi-game operations dashboard for local game servers and background renders.",
   "type": "module",
   "scripts": {
-    "start": "node scripts/game-dashboard-server.js",
-    "dashboard": "node scripts/game-dashboard-server.js",
-    "check": "node --check scripts/game-dashboard-server.js"
+    "start": "node scripts/sync-obstacle-catalog.js && node scripts/game-dashboard-server.js",
+    "dashboard": "node scripts/sync-obstacle-catalog.js && node scripts/game-dashboard-server.js",
+    "sync:obstacles": "node scripts/sync-obstacle-catalog.js",
+    "check": "node scripts/sync-obstacle-catalog.js && node --check scripts/game-dashboard-server.js && node --check scripts/sync-obstacle-catalog.js"
   }
 }

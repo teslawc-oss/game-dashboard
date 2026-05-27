@@ -3,7 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,13 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const dashboardRoot = path.resolve(__dirname, '..');
+const dashboardObstacleCatalogPath = path.join(dashboardRoot, 'shared', 'obstacle-catalog.json');
+const marbleRaceObstacleCatalogPath = path.resolve(dashboardRoot, '..', 'marble-race', 'src', 'obstacle-catalog.json');
+if (existsSync(marbleRaceObstacleCatalogPath)) {
+  mkdirSync(path.dirname(dashboardObstacleCatalogPath), { recursive: true });
+  copyFileSync(marbleRaceObstacleCatalogPath, dashboardObstacleCatalogPath);
+}
+const obstacleCatalogData = JSON.parse(readFileSync(dashboardObstacleCatalogPath, 'utf8'));
 const configPath = process.env.GAME_DASHBOARD_CONFIG || path.join(dashboardRoot, 'config', 'games.json');
 const dashboardConfig = JSON.parse(readFileSync(configPath, 'utf8'));
 const PORT = Number(process.env.GAME_DASHBOARD_PORT || process.env.MARBLE_DASHBOARD_PORT || dashboardConfig.dashboard?.port || 8888);
@@ -128,28 +135,8 @@ function requireDashboardAuth(req, res) {
   return false;
 }
 
-const OBSTACLE_CATEGORIES = {
-  normal: {
-    label: '普通障礙物',
-    description: '物理方向影響、反彈、旋轉、阻擋等現有 pinball 障礙物。',
-  },
-  buff: {
-    label: '增益類',
-    description: '預留給之後加速、保護、分數或能力提升效果。',
-  },
-  debuff: {
-    label: '減益類',
-    description: '預留給之後減速、干擾、失控或懲罰效果。',
-  },
-};
-
-const OBSTACLE_TYPES = [
-  { value: 'popBumper', label: 'Pop Bumper', category: 'normal' },
-  { value: 'pinBumper', label: 'Pin Bumper', category: 'normal' },
-  { value: 'slingshot', label: 'Slingshot', category: 'normal' },
-  { value: 'spinnerGate', label: 'Spinner Gate', category: 'normal' },
-  { value: 'dropTarget', label: 'Drop Target', category: 'buff' },
-];
+const OBSTACLE_CATEGORIES = obstacleCatalogData.categories;
+const OBSTACLE_TYPES = obstacleCatalogData.types;
 
 const OBSTACLE_DISTRIBUTION_MODES = [
   { value: 'random', label: '完全隨機', description: 'Each obstacle independently picks a random enabled type and distance.' },
@@ -200,10 +187,13 @@ const SCHEDULE_ACTIONS = [
         uploadYoutube: true,
         youtubePrivacy: 'public',
         qualityPreset: '1080p-smooth',
-        qualityLabel: '1080p Smooth · 60fps · fast encode · 1920×1080@60',
+        qualityLabel: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast',
         width: 1920,
         height: 1080,
         fps: 60,
+        crf: 18,
+        captureScale: 1,
+        videoPreset: 'veryfast',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -239,10 +229,13 @@ const SCHEDULE_ACTIONS = [
         uploadYoutube: true,
         youtubePrivacy: 'public',
         qualityPreset: '1080p-smooth',
-        qualityLabel: '1080p Smooth · 60fps · fast encode · 1080×1920@60',
+        qualityLabel: '1080p Smooth · 1080×1920 · 60fps · CRF18 · veryfast',
         width: 1080,
         height: 1920,
         fps: 60,
+        crf: 18,
+        captureScale: 1,
+        videoPreset: 'veryfast',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -593,7 +586,7 @@ function normalizeOptions(input = {}) {
   const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 12)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const qualitySettings = {
-    '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p Smooth · 60fps · fast encode' },
+    '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast' },
     '1080p': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p · 60fps · fast encode' },
     '1440p': { width: 2560, height: 1440, crf: 20, captureScale: 1, fps: 60, videoPreset: 'faster', label: 'High 1440p · 60fps · faster encode' },
     '4k': { width: 3840, height: 2160, crf: 20, captureScale: 1, fps: 60, videoPreset: 'faster', label: 'Ultra 4K · 60fps · faster encode' },
@@ -1345,7 +1338,8 @@ function appendGameServerLog(chunk) {
 
 function probeUrl(url, timeoutMs = 900) {
   return new Promise((resolve) => {
-    const req = http.get(url, (res) => {
+    const client = String(url).startsWith('https:') ? https : http;
+    const req = client.get(url, (res) => {
       res.resume();
       resolve({ online: true, statusCode: res.statusCode });
     });
@@ -1734,7 +1728,7 @@ function dashboardHtml() {
           <div>
             <label for="qualityPreset">畫質</label>
             <select id="qualityPreset" name="qualityPreset">
-              <option value="1080p-smooth" selected>1080p Smooth（60fps）</option>
+              <option value="1080p-smooth" selected>1080p Smooth（1920×1080 / 60fps / CRF18 / veryfast）</option>
               <option value="1080p">1080p（60fps）</option>
               <option value="1440p">High 1440p（60fps）</option>
               <option value="4k">Ultra 4K（60fps）</option>
@@ -1992,7 +1986,7 @@ function setTypes(types) {
   document.querySelectorAll('input[name="obstacleTypes"]').forEach((el) => { el.checked = types.includes(el.value); });
 }
 document.querySelector('#allTypes').onclick = () => setTypes(${JSON.stringify(OBSTACLE_TYPES.map((type) => type.value))});
-document.querySelector('#bumperOnly').onclick = () => setTypes(['popBumper']);
+document.querySelector('#bumperOnly').onclick = () => setTypes(${JSON.stringify(OBSTACLE_TYPES.filter((type) => type.tags?.includes('bumper')).map((type) => type.value))});
 document.querySelector('#clearTypes').onclick = () => setTypes([]);
 const randomTitleBtn = document.querySelector('#randomTitleBtn');
 const testThumbnailBtn = document.querySelector('#testThumbnailBtn');
