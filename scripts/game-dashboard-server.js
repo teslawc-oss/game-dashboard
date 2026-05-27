@@ -1022,7 +1022,9 @@ function startRender(options) {
   if (options.obstacleTypes.length) renderExtraArgs.push(`--obstacle-types=${options.obstacleTypes.join(',')}`);
   if (!options.audio) renderExtraArgs.push('--audio=false');
   const [renderBin, ...renderBaseRest] = baseRenderArgs;
-  const args = [...renderBaseRest, ...renderExtraArgs];
+  // Insert -- separator for npm run so extra args reach the script
+  const needsNpmSeparator = renderBaseRest.includes('run') || renderBaseRest.includes('exec');
+  const args = [...renderBaseRest, ...(needsNpmSeparator ? ['--'] : []), ...renderExtraArgs];
 
   const job = {
     id,
