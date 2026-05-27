@@ -775,6 +775,8 @@ function publicJob(job) {
   const renderLog = job.renderLog || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.render.log` : null);
   const renderLogExists = Boolean(renderLog && existsSync(renderLog));
   const size = outputExists ? statSync(job.output).size : 0;
+  const canStop = ['running', 'starting'].includes(job.status) && Boolean(job.child);
+  const stopUrl = canStop ? `/api/jobs/${encodeURIComponent(job.id)}/stop` : null;
   return {
     id: job.id,
     status: job.status,
@@ -812,6 +814,8 @@ function publicJob(job) {
     error: job.error,
     progress: estimateJobProgress(job),
     log: job.log.slice(-16000),
+    canStop,
+    stopUrl,
   };
 }
 
@@ -1430,25 +1434,15 @@ function spawnDetached(command, args, options = {}) {
 }
 
 function restartRenderStack({ dryRun = false } = {}) {
-  const CHROME_CDP_PORT = 9222;
-  const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-  const CHROME_CDP_FLAGS = [
-    `--remote-debugging-port=${CHROME_CDP_PORT}`,
-    '--user-data-dir=/Users/bert/.hermes/chrome-cdp-profile',
-    '--no-first-run',
-    '--no-default-browser-check',
-  ];
 
   const results = {
     viteDev: { port: 5174, action: 'none' },
     proxyHttps: { action: 'none' },
-    chromeCdp: { port: CHROME_CDP_PORT, action: 'none' },
   };
 
   if (dryRun) {
     results.viteDev.action = 'dry-run';
     results.proxyHttps.action = 'dry-run';
-    results.chromeCdp.action = 'dry-run';
     return results;
   }
 
@@ -1476,16 +1470,6 @@ function restartRenderStack({ dryRun = false } = {}) {
     results.proxyHttps.action = 'restarted';
   } else {
     results.proxyHttps.action = 'not-running';
-  }
-
-  // Kill & restart Chrome CDP
-  const chromeKillResult = killProcessOnPort(CHROME_CDP_PORT);
-  results.chromeCdp.kill = chromeKillResult;
-  if (chromeKillResult.killed > 0) {
-    results.chromeCdp.pid = spawnDetached(CHROME_PATH, CHROME_CDP_FLAGS);
-    results.chromeCdp.action = 'restarted';
-  } else {
-    results.chromeCdp.action = 'not-running';
   }
 
   return results;
@@ -1783,6 +1767,7 @@ function dashboardHtml() {
     <nav class="tabs" aria-label="Dashboard tabs">
       <button class="tab-btn active" type="button" data-tab-target="renderTab">Render</button>
       <button class="tab-btn" type="button" data-tab-target="scheduleTab">Schedule</button>
+      <button class="tab-btn" type="button" data-tab-target="jobsTab">Jobs</button>
     </nav>
 
     <section id="renderTab" class="tab-panel shell">
@@ -1991,6 +1976,15 @@ function dashboardHtml() {
           <div class="actions"><button id="scheduleSaveBtn" type="submit">Save item</button><button id="scheduleDeleteBtn" class="danger" type="button" disabled>Delete</button></div>
           <pre id="scheduleLog" class="mini-log">等待 schedule...</pre>
         </form>
+      </div>
+    </section>
+
+    <section id="jobsTab" class="tab-panel" hidden>
+      <div class="schedule-layout">
+        <section class="card" style="grid-column:1/-1">
+          <div class="card-head"><h2>All Jobs</h2><button id="jobsRefreshBtn" class="secondary" type="button">Refresh</button></div>
+          <div id="jobsList"><p class="muted">Loading...</p></div>
+        </section>
       </div>
     </section>
   </main>
@@ -2614,6 +2608,45 @@ stopBtn.onclick = async () => {
   await fetch('/api/jobs/' + encodeURIComponent(currentJobId) + '/stop', { method: 'POST' });
   await pollJob();
 };
+// ── Jobs tab ──
+const jobsListEl = document.querySelector('#jobsList');
+const jobsRefreshBtn = document.querySelector('#jobsRefreshBtn');
+async function refreshJobs() {
+  try {
+    const res = await fetch('/api/jobs');
+    const data = await res.json();
+    if (!data.ok || !data.jobs.length) {
+      jobsListEl.innerHTML = '<p class="muted">No jobs yet</p>';
+      return;
+    }
+    jobsListEl.innerHTML = data.jobs.map((job) => {
+      const statusClass = job.status === 'completed' ? 'completed' : job.status === 'failed' ? 'failed' : job.status === 'running' || job.status === 'starting' ? 'running' : '';
+      const progress = job.progress || {};
+      const stopBtn = job.canStop ? '<button class="danger" style="padding:3px 8px;font-size:11px" data-stop-job="' + job.id + '">Stop</button>' : '';
+      const logLink = job.renderLogExists ? ' <a href="' + job.renderLogUrl + '" target="_blank">📄 log</a>' : '';
+      const streamLog = job.log ? '<pre style="max-height:120px;overflow-y:auto;font-size:10px;margin:4px 0 0;background:rgba(0,0,0,.3);padding:6px;border-radius:8px">' + job.log.slice(-600).replace(/</g,'&lt;') + '</pre>' : '';
+      return '<div class="schedule-log-entry ' + statusClass + '" style="margin-bottom:8px">' +
+        '<b>#' + job.id + ' <span class="run-dot ' + statusClass + '"></span> ' + job.status + '</b>' +
+        '<span>' + (job.outputName || job.outputTitle || '') + ' · ' + (progress.label || '') + ' ' + (progress.percent || 0) + '%</span>' +
+        '<div style="margin-top:4px">' + stopBtn + logLink + '</div>' +
+        streamLog +
+        '</div>';
+    }).join('');
+    // Wire stop buttons
+    jobsListEl.querySelectorAll('[data-stop-job]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const jobId = btn.getAttribute('data-stop-job');
+        btn.disabled = true;
+        btn.textContent = 'Stopping...';
+        await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/stop', { method: 'POST' });
+        setTimeout(refreshJobs, 800);
+      });
+    });
+  } catch { jobsListEl.innerHTML = '<p class="muted">Failed to load jobs</p>'; }
+}
+jobsRefreshBtn.onclick = refreshJobs;
+refreshJobs();
+setInterval(refreshJobs, 5000);
 refreshRecordings();
 refreshGameServer();
 setInterval(refreshGameServer, 3000);
