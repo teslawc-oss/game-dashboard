@@ -505,18 +505,32 @@ function saveScheduleRunState(state) {
   return normalized;
 }
 
-function safeSlug(value, fallback = 'marble-cup') {
-  const slug = String(value || fallback)
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80);
-  return slug || fallback;
+function formatHongKongTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}-hkt`;
+}
+
+function renderKindSlug(options = {}) {
+  return String(options.videoCanvasLayout || '').toLowerCase() === 'vertical' ? 'short-video' : 'long-video';
+}
+
+function renderBaseName(options = {}, date = new Date()) {
+  return `${formatHongKongTimestamp(date)}-${renderKindSlug(options)}`;
 }
 
 function renderTitleSlug(options = {}, fallbackParts = []) {
-  const title = options.thumbnailTitle || options.cupName || fallbackParts.filter(Boolean).join('-');
-  return safeSlug(title, 'marble-rush');
+  return renderBaseName(options);
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -951,16 +965,16 @@ function generateThumbnailTest(input = {}) {
 
 function startRender(options) {
   const id = String(nextJobId++);
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const titleSlug = renderTitleSlug(options, [options.recordMode, options.density, options.lengthMode]);
-  const typeSlug = options.obstacleTypes.length ? options.obstacleTypes.join('-') : 'all-obstacles';
-  const bundleName = `${stamp}-${titleSlug}`;
+  const createdAt = new Date();
+  const outputBaseName = renderBaseName(options, createdAt);
+  const typeSlug = renderKindSlug(options);
+  const bundleName = outputBaseName;
   const bundleDir = path.join(recordingsDir, bundleName);
-  const output = path.join(bundleDir, `${titleSlug}.output.${options.format}`);
-  const thumbnail = path.join(bundleDir, `${titleSlug}.thumbnail.jpg`);
-  const youtubeMetadata = path.join(bundleDir, `${titleSlug}.youtube.json`);
-  const youtubeUpload = path.join(bundleDir, `${titleSlug}.youtube-upload.json`);
-  const renderLog = path.join(bundleDir, `${titleSlug}.log`);
+  const output = path.join(bundleDir, `${outputBaseName}.${options.format}`);
+  const thumbnail = path.join(bundleDir, `${outputBaseName}.thumbnail.jpg`);
+  const youtubeMetadata = path.join(bundleDir, `${outputBaseName}.youtube.json`);
+  const youtubeUpload = path.join(bundleDir, `${outputBaseName}.youtube-upload.json`);
+  const renderLog = path.join(bundleDir, `${outputBaseName}.log`);
   const renderPort = nextRenderPort++;
   const renderUrl = `http://127.0.0.1:${renderPort}`;
   const baseRenderArgs = splitCommand(activeGame.render.command);
@@ -1006,15 +1020,15 @@ function startRender(options) {
   const job = {
     id,
     status: options.dryRun ? 'completed' : 'running',
-    createdAt: new Date().toISOString(),
-    startedAt: new Date().toISOString(),
-    finishedAt: options.dryRun ? new Date().toISOString() : null,
+    createdAt: createdAt.toISOString(),
+    startedAt: createdAt.toISOString(),
+    finishedAt: options.dryRun ? createdAt.toISOString() : null,
     exitCode: options.dryRun ? 0 : null,
     signal: null,
     options,
     output,
     outputFolder: bundleDir,
-    outputTitle: titleSlug,
+    outputTitle: outputBaseName,
     outputTypeSlug: typeSlug,
     thumbnail,
     youtubeMetadata,
