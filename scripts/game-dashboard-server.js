@@ -599,6 +599,7 @@ function normalizeOptions(input = {}) {
   const videoCapture = input.videoCapture === 'playwright' ? 'playwright' : 'canvas';
   const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 12)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
+  const renderPerformanceProfile = input.renderPerformanceProfile === 'turbo60' ? 'turbo60' : 'turbo60';
   const qualitySettings = {
     '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast' },
     '1080p': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p · 60fps · fast encode' },
@@ -674,6 +675,7 @@ function normalizeOptions(input = {}) {
     estimatedOutputSeconds,
     estimatedWallClockSeconds,
     qualityPreset,
+    renderPerformanceProfile,
     qualityLabel: qualitySettings.label,
     width,
     height,
@@ -995,6 +997,7 @@ function startRender(options) {
     `--crf=${options.crf}`,
     `--capture-scale=${options.captureScale}`,
     `--video-preset=${options.videoPreset}`,
+    `--render-performance-profile=${options.renderPerformanceProfile || 'turbo60'}`,
     `--timeout=${options.timeout}`,
     `--tts-voice=${options.ttsVoice}`,
     `--thumbnail=${options.thumbnail ? 'true' : 'false'}`,
@@ -1743,9 +1746,12 @@ function dashboardHtml() {
             <label for="qualityPreset">畫質</label>
             <select id="qualityPreset" name="qualityPreset">
               <option value="1080p-smooth" selected>1080p Smooth（1920×1080 / 60fps / CRF18 / veryfast）</option>
-              <option value="1080p">1080p（60fps）</option>
-              <option value="1440p">High 1440p（60fps）</option>
-              <option value="4k">Ultra 4K（60fps）</option>
+            </select>
+          </div>
+          <div>
+            <label for="renderPerformanceProfile">效能模式</label>
+            <select id="renderPerformanceProfile" name="renderPerformanceProfile">
+              <option value="turbo60" selected>Turbo 60（高效能）</option>
             </select>
           </div>
           <div>
@@ -2479,6 +2485,7 @@ form.addEventListener('submit', async (event) => {
     videoCapture: form.videoCapture?.value || 'canvas',
     videoCanvasLayout: form.videoCanvasLayout?.value || 'horizontal',
     qualityPreset: form.qualityPreset.value,
+    renderPerformanceProfile: form.renderPerformanceProfile?.value || 'turbo60',
     cupSize: normalizeCupSize(),
     lengthMode: form.lengthMode.value,
     targetMinutes: Number(form.targetMinutes.value),
@@ -2573,6 +2580,9 @@ async function handleRequest(req, res) {
       videoCanvasLayouts: [
         { value: 'horizontal', label: 'Horizontal 16:9', default: true, youtubeKind: 'long', width: 1920, height: 1080 },
         { value: 'vertical', label: 'Vertical 9:16 Shorts', youtubeKind: 'shorts', width: 1080, height: 1920 },
+      ],
+      renderPerformanceProfiles: [
+        { value: 'turbo60', label: 'Turbo 60（高效能）', default: true },
       ],
       schedule: { endpoint: '/api/schedule', path: schedulePath, weekdays: SCHEDULE_WEEKDAYS, recurrences: SCHEDULE_RECURRENCES, actions: SCHEDULE_ACTIONS },
       defaults: { uploadYoutube: false, youtubePrivacy: 'private', videoCanvasLayout: 'horizontal' },
