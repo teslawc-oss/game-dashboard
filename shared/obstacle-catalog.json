@@ -1,0 +1,24 @@
+{
+  "categories": {
+    "normal": {
+      "label": "普通障礙物",
+      "description": "物理方向影響、反彈、旋轉、阻擋等現有 pinball 障礙物。"
+    },
+    "buff": {
+      "label": "增益類",
+      "description": "預留給之後加速、保護、分數或能力提升效果。"
+    },
+    "debuff": {
+      "label": "減益類",
+      "description": "預留給之後減速、干擾、失控或懲罰效果。"
+    }
+  },
+  "types": [
+    { "value": "popBumper", "label": "Pop Bumper", "category": "normal", "tags": ["bumper"] },
+    { "value": "pinBumper", "label": "Pin Bumper", "category": "normal", "tags": ["bumper"] },
+    { "value": "gongBumper", "label": "Gong Bumper", "category": "normal", "tags": ["bumper", "event"] },
+    { "value": "slingshot", "label": "Slingshot", "category": "normal", "tags": [] },
+    { "value": "spinnerGate", "label": "Spinner Gate", "category": "normal", "tags": [] },
+    { "value": "dropTarget", "label": "Drop Target", "category": "buff", "tags": ["target", "buff"] }
+  ]
+}
