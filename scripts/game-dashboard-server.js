@@ -1059,7 +1059,9 @@ function startRender(options) {
     cwd: rootDir,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, BROWSER: 'none' },
+    detached: true,
   });
+  child.unref();
   job.child = child;
 
   const append = (chunk) => {
