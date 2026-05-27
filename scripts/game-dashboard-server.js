@@ -44,7 +44,7 @@ const games = (dashboardConfig.games || []).map((game) => {
       startCommand: server.startCommand || 'npm run dev -- --host 127.0.0.1 --port 5173',
     },
     render: {
-      command: game.render?.command || 'npm run render:auto-cup -- --no-build',
+      command: game.render?.command || 'npm run render:auto-cup',
     },
     thumbnail: {
       command: game.thumbnail?.command || 'node scripts/generate-youtube-thumbnail.js',
@@ -1399,17 +1399,111 @@ function getDashboardLaunchAgentStatus() {
   };
 }
 
+function killProcessOnPort(port) {
+  try {
+    const result = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', timeout: 5000 });
+    const pids = (result.stdout || '').trim().split(/\s+/).filter(Boolean);
+    if (!pids.length) return { port, killed: 0, pids: [] };
+    spawnSync('kill', pids, { timeout: 3000 });
+    // Wait a tick then force-kill any survivors
+    setTimeout(() => {
+      try {
+        const check = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', timeout: 3000 });
+        const survivors = (check.stdout || '').trim().split(/\s+/).filter(Boolean);
+        if (survivors.length) spawnSync('kill', ['-9', ...survivors], { timeout: 2000 });
+      } catch { /* best effort */ }
+    }, 800).unref();
+    return { port, killed: pids.length, pids };
+  } catch (error) {
+    return { port, killed: 0, pids: [], error: error.message };
+  }
+}
+
+function spawnDetached(command, args, options = {}) {
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: 'ignore',
+    ...options,
+  });
+  child.unref();
+  return child.pid;
+}
+
+function restartRenderStack({ dryRun = false } = {}) {
+  const CHROME_CDP_PORT = 9222;
+  const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  const CHROME_CDP_FLAGS = [
+    `--remote-debugging-port=${CHROME_CDP_PORT}`,
+    '--user-data-dir=/Users/bert/.hermes/chrome-cdp-profile',
+    '--no-first-run',
+    '--no-default-browser-check',
+  ];
+
+  const results = {
+    viteDev: { port: 5174, action: 'none' },
+    proxyHttps: { action: 'none' },
+    chromeCdp: { port: CHROME_CDP_PORT, action: 'none' },
+  };
+
+  if (dryRun) {
+    results.viteDev.action = 'dry-run';
+    results.proxyHttps.action = 'dry-run';
+    results.chromeCdp.action = 'dry-run';
+    return results;
+  }
+
+  // Kill & restart Vite dev server
+  const viteKillResult = killProcessOnPort(5174);
+  results.viteDev.kill = viteKillResult;
+  if (viteKillResult.killed > 0) {
+    results.viteDev.pid = spawnDetached('npm', ['run', 'dev:backend'], { cwd: rootDir });
+    results.viteDev.action = 'restarted';
+  } else {
+    results.viteDev.action = 'not-running';
+  }
+
+  // Check if proxy was running before we killed anything
+  let proxyWasRunning = false;
+  try {
+    const check = spawnSync('pgrep', ['-f', 'marble-https-proxy.js'], { encoding: 'utf8', timeout: 2000 });
+    proxyWasRunning = check.status === 0 && (check.stdout || '').trim().length > 0;
+  } catch { proxyWasRunning = false; }
+
+  // Kill & restart HTTPS proxy
+  if (proxyWasRunning) {
+    try { spawnSync('pkill', ['-f', 'marble-https-proxy.js'], { encoding: 'utf8', timeout: 3000 }); } catch { /* best effort */ }
+    results.proxyHttps.pid = spawnDetached('npm', ['run', 'proxy:https'], { cwd: rootDir });
+    results.proxyHttps.action = 'restarted';
+  } else {
+    results.proxyHttps.action = 'not-running';
+  }
+
+  // Kill & restart Chrome CDP
+  const chromeKillResult = killProcessOnPort(CHROME_CDP_PORT);
+  results.chromeCdp.kill = chromeKillResult;
+  if (chromeKillResult.killed > 0) {
+    results.chromeCdp.pid = spawnDetached(CHROME_PATH, CHROME_CDP_FLAGS);
+    results.chromeCdp.action = 'restarted';
+  } else {
+    results.chromeCdp.action = 'not-running';
+  }
+
+  return results;
+}
+
 function restartDashboardServer({ dryRun = false } = {}) {
   const domainTarget = getLaunchAgentDomainTarget();
   const serviceTarget = `${domainTarget}/${DASHBOARD_LAUNCH_AGENT_LABEL}`;
   const command = ['launchctl', 'kickstart', '-k', serviceTarget];
   const before = getDashboardLaunchAgentStatus();
   if (dryRun) {
+    const renderStack = restartRenderStack({ dryRun: true });
     return {
       restarted: false,
       dryRun: true,
       command: command.join(' '),
       before,
+      renderStack,
       message: 'dry-run only; dashboard server was not restarted',
     };
   }
@@ -1422,6 +1516,8 @@ function restartDashboardServer({ dryRun = false } = {}) {
       error: `LaunchAgent plist not found: ${DASHBOARD_LAUNCH_AGENT_PLIST}`,
     };
   }
+  // Kill and restart the render stack (Vite, proxy, Chrome CDP) BEFORE kicking dashboard
+  const renderStack = restartRenderStack({ dryRun: false });
   setTimeout(() => {
     const child = spawn(command[0], command.slice(1), { detached: true, stdio: 'ignore' });
     child.unref();
@@ -1432,7 +1528,8 @@ function restartDashboardServer({ dryRun = false } = {}) {
     dryRun: false,
     command: command.join(' '),
     before,
-    message: 'dashboard restart scheduled; this HTTP connection may drop while launchd restarts the server',
+    renderStack,
+    message: 'render stack + dashboard restart scheduled; this HTTP connection may drop while launchd restarts the server',
   };
 }
 

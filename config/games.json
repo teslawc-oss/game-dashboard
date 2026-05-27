@@ -20,7 +20,7 @@
         "startCommand": "npm run dev:stack"
       },
       "render": {
-        "command": "npm run render:auto-cup -- --no-build"
+        "command": "npm run render:auto-cup"
       },
       "thumbnail": {
         "command": "node scripts/generate-youtube-thumbnail.js"
