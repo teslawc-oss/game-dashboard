@@ -241,6 +241,45 @@ const SCHEDULE_ACTIONS = [
       },
     },
   },
+  {
+    value: 'test-marble-render',
+    label: 'Test - Marble Debug Render',
+    description: 'Run a short non-upload Marble Rush render for scheduled-job debugging.',
+    payload: {
+      game: 'marble-rush',
+      kind: 'youtube-upload',
+      titleHint: 'Test Marble Debug Render',
+      renderOptions: {
+        recordMode: 'continuous',
+        multipleRaceCount: 1,
+        lengthMode: 'target-duration',
+        targetMinutes: 1,
+        targetSeconds: 60,
+        trackLength: 140,
+        density: 'few',
+        obstacleDistribution: 'random',
+        obstacleTypes: ['spinner', 'bumper', 'boost-pad'],
+        format: 'mp4',
+        comparisonWebm: true,
+        videoCapture: 'canvas',
+        videoCanvasLayout: 'horizontal',
+        thumbnail: false,
+        uploadYoutube: false,
+        youtubePrivacy: 'private',
+        qualityPreset: '1080p-smooth',
+        qualityLabel: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        crf: 18,
+        captureScale: 1,
+        videoPreset: 'veryfast',
+        renderPerformanceProfile: 'turbo60',
+        ttsVoice: 'Alex',
+        renderPort: 4300,
+      },
+    },
+  },
 ];
 
 
@@ -525,8 +564,14 @@ function renderKindSlug(options = {}) {
   return String(options.videoCanvasLayout || '').toLowerCase() === 'vertical' ? 'short-video' : 'long-video';
 }
 
+function renderSourceSlug(options = {}) {
+  if (options.scheduleSource) return 'scheduled';
+  if (options.dashboardSource) return 'dashboard';
+  return '';
+}
+
 function renderBaseName(options = {}, date = new Date()) {
-  return `${formatHongKongTimestamp(date)}-${renderKindSlug(options)}`;
+  return [formatHongKongTimestamp(date), renderSourceSlug(options), renderKindSlug(options)].filter(Boolean).join('-');
 }
 
 function renderTitleSlug(options = {}, fallbackParts = []) {
@@ -697,6 +742,8 @@ function normalizeOptions(input = {}) {
     thumbnailTitle,
     ttsVoice,
     dryRun,
+    dashboardSource: input.dashboardSource && typeof input.dashboardSource === 'object' && !Array.isArray(input.dashboardSource) ? { ...input.dashboardSource } : null,
+    scheduleSource: input.scheduleSource && typeof input.scheduleSource === 'object' && !Array.isArray(input.scheduleSource) ? { ...input.scheduleSource } : null,
   };
 }
 
@@ -832,8 +879,7 @@ function listRecordingFiles(dir = recordingsDir, prefix = '') {
 function listRecordings() {
   if (!existsSync(recordingsDir)) return [];
   return listRecordingFiles()
-    .filter(({ name }) => /\.(webm|mp4|jpe?g|png|json)$/i.test(name))
-    .filter(({ name }) => !/\.metadata\.json$/i.test(name))
+    .filter(({ name }) => /\.mp4$/i.test(name))
     .map(({ name, full }) => {
       const st = statSync(full);
       const base = name.replace(/\.[^.]+$/, '');
@@ -848,14 +894,14 @@ function listRecordings() {
         size: st.size,
         modifiedAt: st.mtime.toISOString(),
         url: recordingUrl(full),
-        isVideo: /\.(webm|mp4)$/i.test(name),
-        isThumbnail: /\.(?:thumbnail|test-thumbnail)\.jpe?g$/i.test(name),
-        isYoutubeMetadata: /\.youtube\.json$/i.test(name),
-        thumbnailExists: /\.(webm|mp4)$/i.test(name) && existsSync(thumbnailPath),
+        isVideo: true,
+        isThumbnail: false,
+        isYoutubeMetadata: false,
+        thumbnailExists: existsSync(thumbnailPath),
         thumbnailUrl: recordingUrl(thumbnailPath),
-        youtubeMetadataExists: /\.(webm|mp4)$/i.test(name) && existsSync(youtubePath),
+        youtubeMetadataExists: existsSync(youtubePath),
         youtubeMetadataUrl: recordingUrl(youtubePath),
-        youtubeUploadExists: /\.(webm|mp4)$/i.test(name) && existsSync(candidate('.youtube-upload.json')),
+        youtubeUploadExists: existsSync(candidate('.youtube-upload.json')),
         youtubeUploadUrl: recordingUrl(candidate('.youtube-upload.json')),
       };
     })
@@ -969,6 +1015,107 @@ function generateThumbnailTest(input = {}) {
   };
 }
 
+function collectStaleRenderProcessCleanup(options = {}) {
+  const renderPort = Number(options.renderPort || 0);
+  const includeHeadlessChrome = options.includeHeadlessChrome !== false;
+  const snapshot = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], {
+    encoding: 'utf8',
+    timeout: 2500,
+    maxBuffer: 1024 * 1024,
+  });
+  if (snapshot.error) return { ok: false, error: snapshot.error.message, candidates: [], killed: [], output: '' };
+  const rows = String(snapshot.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      if (!match) return null;
+      return { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] };
+    })
+    .filter(Boolean);
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const byParent = new Map();
+  for (const row of rows) {
+    if (!byParent.has(row.ppid)) byParent.set(row.ppid, []);
+    byParent.get(row.ppid).push(row);
+  }
+  const renderPortPids = new Set();
+  if (Number.isFinite(renderPort) && renderPort > 0) {
+    const portUsers = spawnSync('lsof', ['-nP', '-tiTCP:' + renderPort, '-sTCP:LISTEN'], {
+      encoding: 'utf8',
+      timeout: 2000,
+      maxBuffer: 256 * 1024,
+    });
+    for (const pidText of String(portUsers.stdout || '').split(/\s+/).filter(Boolean)) {
+      const pid = Number(pidText);
+      if (Number.isFinite(pid)) renderPortPids.add(pid);
+    }
+  }
+  const rootCandidates = rows.filter((row) => {
+    if (row.pid === process.pid) return false;
+    if (/\bvite\s+preview\b/i.test(row.command)) return true;
+    if (renderPortPids.has(row.pid)) return true;
+    if (!includeHeadlessChrome) return false;
+    return /(?:chrome-headless-shell|chromium|google chrome|Google Chrome)/i.test(row.command)
+      && /--headless(?:=|\b)|--headless=new\b/i.test(row.command);
+  });
+  for (const pid of renderPortPids) {
+    const row = byPid.get(pid);
+    if (row && row.pid !== process.pid && !rootCandidates.some((candidate) => candidate.pid === row.pid)) {
+      rootCandidates.push(row);
+    }
+  }
+  const candidates = [];
+  const seen = new Set();
+  const addWithChildren = (row) => {
+    if (!row || seen.has(row.pid) || row.pid === process.pid) return;
+    seen.add(row.pid);
+    candidates.push(row);
+    for (const child of byParent.get(row.pid) || []) addWithChildren(child);
+  };
+  for (const row of rootCandidates) addWithChildren(row);
+  candidates.sort((a, b) => b.pid - a.pid);
+  const killed = [];
+  for (const row of candidates) {
+    try {
+      process.kill(row.pid, 'SIGTERM');
+      killed.push({ pid: row.pid, signal: 'SIGTERM', command: row.command });
+    } catch (error) {
+      killed.push({ pid: row.pid, signal: 'SIGTERM', error: error.message, command: row.command });
+    }
+  }
+  if (candidates.length) {
+    spawnSync('sleep', ['0.5'], { timeout: 1000 });
+    for (const row of candidates) {
+      try {
+        process.kill(row.pid, 0);
+      } catch {
+        continue;
+      }
+      try {
+        process.kill(row.pid, 'SIGKILL');
+        killed.push({ pid: row.pid, signal: 'SIGKILL', command: row.command });
+      } catch (error) {
+        killed.push({ pid: row.pid, signal: 'SIGKILL', error: error.message, command: row.command });
+      }
+    }
+  }
+  return {
+    ok: true,
+    capturedAt: new Date().toISOString(),
+    renderPort: Number.isFinite(renderPort) && renderPort > 0 ? renderPort : null,
+    includeHeadlessChrome,
+    renderPortPids: [...renderPortPids],
+    candidates: candidates.map((row) => ({ pid: row.pid, ppid: row.ppid, command: row.command })),
+    killed,
+  };
+}
+
+function collectStaleVitePreviewProcesses(options = {}) {
+  return collectStaleRenderProcessCleanup({ ...options, includeHeadlessChrome: options.includeHeadlessChrome ?? true });
+}
+
 function startRender(options) {
   const id = String(nextJobId++);
   const createdAt = new Date();
@@ -1052,6 +1199,22 @@ function startRender(options) {
   jobs.set(id, job);
 
   mkdirSync(bundleDir, { recursive: true });
+  const staleVitePreviewCleanup = collectStaleVitePreviewProcesses({ renderPort });
+  job.staleVitePreviewCleanup = staleVitePreviewCleanup;
+  const staleVitePreviewCleanupLog = `[dashboard] pre-render process cleanup ${JSON.stringify(staleVitePreviewCleanup, null, 2)}\n`;
+  job.log += staleVitePreviewCleanupLog;
+  appendFileSync(renderLog, staleVitePreviewCleanupLog);
+  if (options.scheduleSource) {
+    updateScheduleRunDiagnostics(job, 'preRenderProcessCleanup', staleVitePreviewCleanup);
+  }
+  if (options.scheduleSource) {
+    const preflight = collectScheduleRenderPreflight(job);
+    job.schedulePreflight = preflight;
+    const preflightLog = formatSchedulePreflightLog(preflight);
+    job.log += preflightLog;
+    appendFileSync(renderLog, preflightLog);
+    updateScheduleRunDiagnostics(job, 'preflight', preflight);
+  }
   if (options.dryRun) {
     writeFileSync(renderLog, job.log);
     return job;
@@ -1065,6 +1228,21 @@ function startRender(options) {
   });
   child.unref();
   job.child = child;
+  if (options.scheduleSource) {
+    setTimeout(() => {
+      if (!jobs.has(job.id)) return;
+      const postSpawn = collectScheduleRenderDiagnostics(job, {
+        reason: 'schedule-render-post-spawn',
+        childPid: child.pid || null,
+      });
+      job.schedulePostSpawn = postSpawn;
+      const postSpawnLog = formatScheduleDiagnosticsLog('schedule render post-spawn', postSpawn);
+      job.log += postSpawnLog;
+      appendFileSync(renderLog, postSpawnLog);
+      updateScheduleRunDiagnostics(job, 'postSpawn', postSpawn);
+      if (job.log.length > 60000) job.log = job.log.slice(-60000);
+    }, 2000).unref?.();
+  }
 
   const append = (chunk) => {
     const text = chunk.toString();
@@ -1085,7 +1263,16 @@ function startRender(options) {
     job.finishedAt = new Date().toISOString();
     job.status = code === 0 ? 'completed' : 'failed';
     if (code !== 0 && !job.error) job.error = `render exited with ${code ?? signal}`;
-    appendFileSync(renderLog, `\n[dashboard] render job ${job.status} exit=${code ?? ''} signal=${signal ?? ''} finishedAt=${job.finishedAt}\n`);
+    const renderJobFinishedLog = `\n[dashboard] render job ${job.status} exit=${code ?? ''} signal=${signal ?? ''} finishedAt=${job.finishedAt}\n`;
+    job.log += renderJobFinishedLog;
+    appendFileSync(renderLog, renderJobFinishedLog);
+    const postRenderCleanup = collectStaleRenderProcessCleanup({ renderPort: job.renderPort, includeHeadlessChrome: true });
+    job.postRenderProcessCleanup = postRenderCleanup;
+    const postRenderCleanupLog = `\n[dashboard] post-render process cleanup ${JSON.stringify(postRenderCleanup, null, 2)}\n`;
+    job.log += postRenderCleanupLog;
+    appendFileSync(renderLog, postRenderCleanupLog);
+    if (job.log.length > 60000) job.log = job.log.slice(-60000);
+    if (options.scheduleSource) updateScheduleRunDiagnostics(job, 'postRenderProcessCleanup', postRenderCleanup);
     updateScheduleRunForJob(job);
   });
 
@@ -1224,6 +1411,10 @@ function updateScheduleRunForJob(job) {
   const runs = Array.isArray(state.runs) ? state.runs : [];
   const index = runs.findIndex((run) => run.id === source.runId || (run.jobId === job.id && run.runKey === source.runKey));
   if (index < 0) return null;
+  const outputName = job.output ? recordingDisplayName(job.output) : null;
+  const thumbnailPath = job.thumbnail || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.thumbnail.jpg` : null);
+  const youtubeMetadataPath = job.youtubeMetadata || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.youtube.json` : null);
+  const youtubeUploadPath = job.youtubeUpload || (job.output ? `${job.output.replace(/\.[^.]+$/, '')}.youtube-upload.json` : null);
   runs[index] = {
     ...runs[index],
     status: job.status === 'completed' ? 'completed' : 'failed',
@@ -1231,10 +1422,195 @@ function updateScheduleRunForJob(job) {
     exitCode: job.exitCode,
     signal: job.signal,
     error: job.error || null,
-    outputName: job.output ? recordingDisplayName(job.output) : null,
+    renderOptions: job.options ? { ...job.options } : runs[index].renderOptions || null,
+    command: job.command || runs[index].command || null,
+    outputName,
+    outputFolder: job.outputFolder ? recordingDisplayName(job.outputFolder) : (outputName ? path.dirname(outputName) : null),
+    thumbnailName: thumbnailPath ? recordingDisplayName(thumbnailPath) : null,
+    thumbnailExists: Boolean(thumbnailPath && existsSync(thumbnailPath)),
+    youtubeMetadataName: youtubeMetadataPath ? recordingDisplayName(youtubeMetadataPath) : null,
+    youtubeMetadataExists: Boolean(youtubeMetadataPath && existsSync(youtubeMetadataPath)),
+    youtubeUploadName: youtubeUploadPath ? recordingDisplayName(youtubeUploadPath) : null,
+    youtubeUploadExists: Boolean(youtubeUploadPath && existsSync(youtubeUploadPath)),
+    preflight: job.schedulePreflight || runs[index].preflight || null,
+    postSpawn: job.schedulePostSpawn || runs[index].postSpawn || null,
   };
   state.runs = runs;
   return saveScheduleRunState(state);
+}
+
+function updateScheduleRunDiagnostics(job, field, diagnostics) {
+  const source = job?.options?.scheduleSource;
+  if (!source?.runId || !field) return null;
+  const state = loadScheduleRunState();
+  const runs = Array.isArray(state.runs) ? state.runs : [];
+  const index = runs.findIndex((run) => run.id === source.runId || (run.jobId === job.id && run.runKey === source.runKey));
+  if (index < 0) return null;
+  runs[index] = {
+    ...runs[index],
+    [field]: diagnostics,
+  };
+  state.runs = runs;
+  return saveScheduleRunState(state);
+}
+
+function runCommandSnapshot(command, args = [], { timeoutMs = 1500, maxChars = 20000 } = {}) {
+  try {
+    const result = spawnSync(command, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: Math.max(maxChars * 2, 1024 * 1024) });
+    const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
+    return {
+      ok: result.status === 0,
+      status: result.status,
+      signal: result.signal || null,
+      error: result.error?.message || null,
+      output: output.length > maxChars ? `${output.slice(0, maxChars)}\n...[truncated ${output.length - maxChars} chars]` : output,
+    };
+  } catch (error) {
+    return { ok: false, status: null, signal: null, error: error.message, output: '' };
+  }
+}
+
+function summarizeProcessSnapshot(output = '', { childPid = null } = {}) {
+  const lines = String(output || '').split(/\r?\n/).filter(Boolean);
+  const header = lines[0] || '';
+  const rows = lines.slice(1).map((line) => line.trim()).filter(Boolean);
+  const childPidText = childPid ? String(childPid) : null;
+  const interesting = rows.filter((line) => /render-auto-cup|game-dashboard-server|vite(?: |$)|vite preview|Google Chrome|Chrome Helper|Chromium|ffmpeg|node|npm/i.test(line)
+    || (childPidText && new RegExp(`^${childPidText}\\b|^\\S+\\s+${childPidText}\\b`).test(line)));
+  const counts = {
+    totalRows: rows.length,
+    interesting: interesting.length,
+    renderAutoCup: interesting.filter((line) => /render-auto-cup/i.test(line)).length,
+    vite: interesting.filter((line) => /vite/i.test(line)).length,
+    chrome: interesting.filter((line) => /Google Chrome|Chrome Helper|Chromium/i.test(line)).length,
+    ffmpeg: interesting.filter((line) => /ffmpeg/i.test(line)).length,
+    node: interesting.filter((line) => /node/i.test(line)).length,
+    npm: interesting.filter((line) => /npm/i.test(line)).length,
+  };
+  const topCpu = [...interesting]
+    .sort((a, b) => Number((b.match(/^\S+\s+\S+\s+([0-9.]+)/) || [])[1] || 0) - Number((a.match(/^\S+\s+\S+\s+([0-9.]+)/) || [])[1] || 0))
+    .slice(0, 40);
+  const childTree = childPidText
+    ? rows.filter((line) => new RegExp(`^${childPidText}\\b|^\\S+\\s+${childPidText}\\b`).test(line)).slice(0, 40)
+    : [];
+  return { header, counts, topCpu, childPid: childPid || null, childTree };
+}
+
+function collectScheduleRenderDiagnostics(job = {}, { reason = 'schedule-render-preflight', childPid = null } = {}) {
+  const ps = runCommandSnapshot('ps', ['-axo', 'pid,ppid,pcpu,pmem,etime,lstart,command'], { timeoutMs: 2500, maxChars: 90000 });
+  const top = runCommandSnapshot('sh', ['-lc', 'top -l 1 -stats pid,command,cpu,mem,time -o cpu -n 30 2>/dev/null'], { timeoutMs: 4000, maxChars: 30000 });
+  const uptime = runCommandSnapshot('uptime', [], { timeoutMs: 1000, maxChars: 2000 });
+  const vmStat = runCommandSnapshot('vm_stat', [], { timeoutMs: 1000, maxChars: 5000 });
+  const memoryPressure = runCommandSnapshot('memory_pressure', [], { timeoutMs: 2500, maxChars: 8000 });
+  const disk = runCommandSnapshot('df', ['-h', recordingsDir, rootDir, dashboardRoot], { timeoutMs: 1500, maxChars: 4000 });
+  const listeningPorts = runCommandSnapshot('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN'], { timeoutMs: 2500, maxChars: 40000 });
+  const matchingPorts = listeningPorts.output.split(/\r?\n/).filter((line) => /:(?:43\d\d|517\d|8888)\b/.test(line)).slice(0, 100);
+  const renderPortUsers = job.renderPort
+    ? runCommandSnapshot('lsof', ['-nP', '-iTCP', `:${job.renderPort}`], { timeoutMs: 2000, maxChars: 12000 })
+    : null;
+  const childTree = childPid
+    ? runCommandSnapshot('pgrep', ['-P', String(childPid), '-l'], { timeoutMs: 1000, maxChars: 6000 })
+    : null;
+  const tempCaptureDirs = existsSync(recordingsDir)
+    ? readdirSync(recordingsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('.playwright-'))
+      .map((entry) => {
+        const full = path.join(recordingsDir, entry.name);
+        try {
+          const st = statSync(full);
+          return { name: entry.name, modifiedAt: st.mtime.toISOString(), sizeBytes: st.size };
+        } catch {
+          return { name: entry.name, modifiedAt: null, sizeBytes: null };
+        }
+      })
+      .sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))
+      .slice(0, 20)
+    : [];
+  return {
+    capturedAt: new Date().toISOString(),
+    reason,
+    dashboard: {
+      pid: process.pid,
+      uptimeSeconds: Math.round(process.uptime()),
+      cwd: process.cwd(),
+      root: dashboardRoot,
+      configPath,
+      schedulePath,
+      scheduleRunStatePath,
+    },
+    job: {
+      id: job.id || null,
+      outputTitle: job.outputTitle || null,
+      output: job.output || null,
+      renderLog: job.renderLog || null,
+      renderPort: job.renderPort || null,
+      childPid: childPid || job.child?.pid || null,
+      command: job.command || null,
+      options: {
+        width: job.options?.width,
+        height: job.options?.height,
+        fps: job.options?.fps,
+        crf: job.options?.crf,
+        captureScale: job.options?.captureScale,
+        videoPreset: job.options?.videoPreset,
+        renderPerformanceProfile: job.options?.renderPerformanceProfile,
+        videoCapture: job.options?.videoCapture,
+        videoCanvasLayout: job.options?.videoCanvasLayout,
+        format: job.options?.format,
+        multipleRaceCount: job.options?.multipleRaceCount,
+        cupSize: job.options?.cupSize,
+        trackLength: job.options?.trackLength,
+        targetSeconds: job.options?.targetSeconds,
+        lengthMode: job.options?.lengthMode,
+        density: job.options?.density,
+        obstacleTypes: job.options?.obstacleTypes,
+        thumbnail: job.options?.thumbnail,
+        uploadYoutube: job.options?.uploadYoutube,
+      },
+    },
+    activeJobs: Array.from(jobs.values()).map((entry) => ({
+      id: entry.id,
+      status: entry.status,
+      createdAt: entry.createdAt,
+      startedAt: entry.startedAt,
+      finishedAt: entry.finishedAt,
+      renderPort: entry.renderPort,
+      outputTitle: entry.outputTitle,
+      source: entry.options?.scheduleSource ? 'schedule' : entry.options?.dashboardSource ? 'dashboard' : 'manual',
+      pid: entry.child?.pid || null,
+      command: entry.command || null,
+    })),
+    system: {
+      uptime: uptime.output,
+      top: top.output.split(/\r?\n/).slice(0, 45),
+      vmStat: vmStat.output.split(/\r?\n/).slice(0, 30),
+      memoryPressure: memoryPressure.output.split(/\r?\n/).slice(0, 40),
+      disk: disk.output.split(/\r?\n/).slice(0, 20),
+    },
+    processes: summarizeProcessSnapshot(ps.output, { childPid }),
+    childProcesses: childTree ? { ok: childTree.ok, output: childTree.output.split(/\r?\n/).filter(Boolean).slice(0, 80) } : null,
+    ports: {
+      commandOk: listeningPorts.ok,
+      matchingListeners: matchingPorts,
+      renderPortUsers: renderPortUsers ? renderPortUsers.output.split(/\r?\n/).filter(Boolean).slice(0, 80) : [],
+    },
+    recordings: {
+      dir: recordingsDir,
+      tempCaptureDirs,
+    },
+  };
+}
+
+function collectScheduleRenderPreflight(job = {}) {
+  return collectScheduleRenderDiagnostics(job, { reason: 'schedule-render-preflight' });
+}
+
+function formatScheduleDiagnosticsLog(label, diagnostics = {}) {
+  return `[dashboard] ${label} ${JSON.stringify(diagnostics, null, 2)}\n`;
+}
+
+function formatSchedulePreflightLog(preflight = {}) {
+  return formatScheduleDiagnosticsLog('schedule render preflight', preflight);
 }
 
 function publicScheduleWorkerStatus() {
@@ -1261,29 +1637,49 @@ function findRunningRenderJob() {
 
 function executeScheduleAction(item, slot, { dryRun = false } = {}) {
   const actionDefinition = SCHEDULE_ACTIONS.find((entry) => entry.value === item.action);
+  const result = executeActionPayload({
+    actionDefinition,
+    action: item.action,
+    title: item.title,
+    payloadOverride: item.payload || {},
+    dryRun,
+    source: 'schedule',
+    sourceMeta: { item, slot },
+  });
+  if (result.status === 'started' || result.status === 'dry-run') {
+    const { job, ...entry } = result;
+    return { ...entry, status: dryRun ? 'dry-run' : 'started' };
+  }
+  return result;
+}
+
+function executeActionPayload({ actionDefinition, action, title, payloadOverride = {}, dryRun = false, source = 'dashboard', sourceMeta = {} } = {}) {
   const mergedPayload = {
     ...(actionDefinition?.payload || {}),
-    ...(item.payload || {}),
+    ...(payloadOverride || {}),
     renderOptions: {
       ...(actionDefinition?.payload?.renderOptions || {}),
-      ...(item.payload?.renderOptions || {}),
+      ...(payloadOverride?.renderOptions || {}),
     },
   };
   const payload = resolveSchedulePayload(mergedPayload);
-  const runKey = scheduleRunKey(item, slot);
+  const slot = sourceMeta.slot || scheduleSlotForDate(new Date());
+  const item = sourceMeta.item || null;
+  const runKey = source === 'schedule' && item ? scheduleRunKey(item, slot) : `manual@${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const baseEntry = {
-    id: `schedule-run-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
-    itemId: item.id,
-    title: item.title,
-    action: item.action,
+    id: `${source === 'schedule' ? 'schedule-run' : 'job-action-run'}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    itemId: item?.id || null,
+    title: title || actionDefinition?.label || action || 'Run action now',
+    action,
     runKey,
     slot: { ...slot },
     checkedAt: new Date().toISOString(),
     dryRun,
+    source,
   };
 
   if (!actionDefinition) {
-    return { ...baseEntry, status: 'failed', error: `unknown schedule action: ${item.action}` };
+    return { ...baseEntry, status: 'failed', error: `unknown schedule action: ${action}` };
   }
   if (payload.kind !== 'youtube-upload') {
     return { ...baseEntry, status: 'failed', error: `unsupported schedule payload kind: ${payload.kind || 'none'}` };
@@ -1295,9 +1691,13 @@ function executeScheduleAction(item, slot, { dryRun = false } = {}) {
   }
 
   const options = normalizeOptions({ ...(payload.renderOptions || {}), dryRun });
-  options.scheduleSource = { itemId: item.id, title: item.title, action: item.action, runKey, runId: baseEntry.id, checkedAt: baseEntry.checkedAt };
+  if (source === 'schedule' && item) {
+    options.scheduleSource = { itemId: item.id, title: item.title, action, runKey, runId: baseEntry.id, checkedAt: baseEntry.checkedAt };
+  } else {
+    options.dashboardSource = { trigger: 'jobs-tab-run-action', action, runId: baseEntry.id, requestedAt: baseEntry.checkedAt };
+  }
   const job = startRender(options);
-  return { ...baseEntry, status: dryRun ? 'dry-run' : 'started', jobId: job.id, renderOptions: options, command: job.command };
+  return { ...baseEntry, status: dryRun ? 'dry-run' : 'started', jobId: job.id, renderOptions: options, command: job.command, preflight: job.schedulePreflight || null, job };
 }
 
 function runScheduleCheck({ dryRun = false, now = new Date() } = {}) {
@@ -1973,6 +2373,10 @@ function dashboardHtml() {
             <div class="wide"><label for="scheduleAction">Action key</label><select id="scheduleAction">${SCHEDULE_ACTIONS.map((action) => `<option value="${action.value}">${action.label}</option>`).join('')}</select></div>
           </div>
           <label class="check"><input id="scheduleEnabled" type="checkbox" checked> <span>Enabled</span></label>
+          <div class="form-grid">
+            <label class="check"><input id="schedulePayloadThumbnail" type="checkbox" checked> <span>Generate thumbnail（寫入 Payload JSON）</span></label>
+            <label class="check"><input id="schedulePayloadUploadYoutube" type="checkbox" checked> <span>Upload YouTube（寫入 Payload JSON）</span></label>
+          </div>
           <label for="schedulePayload">Payload JSON（比之後 background job 用）</label>
           <textarea id="schedulePayload" spellcheck="false" placeholder='{"game":"marble-rush"}'></textarea>
           <label for="scheduleNotes">備註</label>
@@ -1985,6 +2389,17 @@ function dashboardHtml() {
 
     <section id="jobsTab" class="tab-panel" hidden>
       <div class="schedule-layout">
+        <section class="card" style="grid-column:1/-1">
+          <div class="card-head"><h2>Run Job Now</h2><span class="muted">action + JSON debug trigger</span></div>
+          <p class="sub">揀一個 schedule action，下面 JSON 會自動填 default payload；你可以即場改 JSON，再按 Run now 直接開一個 dashboard-trigger job。</p>
+          <div class="form-grid">
+            <div class="wide"><label for="jobAction">Action</label><select id="jobAction">${SCHEDULE_ACTIONS.map((action) => `<option value="${action.value}">${action.label}</option>`).join('')}</select></div>
+            <div class="wide"><label>&nbsp;</label><div class="actions"><button id="jobActionRunBtn" type="button">Run now</button><button id="jobActionResetBtn" class="secondary" type="button">Reset JSON</button></div></div>
+          </div>
+          <label for="jobActionPayload">Payload JSON</label>
+          <textarea id="jobActionPayload" spellcheck="false" placeholder='{"game":"marble-rush","kind":"youtube-upload","renderOptions":{}}'></textarea>
+          <pre id="jobActionLog" class="mini-log">揀 action，改 JSON，然後 Run now。</pre>
+        </section>
         <section class="card" style="grid-column:1/-1">
           <div class="card-head"><h2>All Jobs</h2><button id="jobsRefreshBtn" class="secondary" type="button">Refresh</button></div>
           <div id="jobsList"><p class="muted">Loading...</p></div>
@@ -2038,6 +2453,8 @@ const scheduleTimes = document.querySelector('#scheduleTimes');
 const scheduleAction = document.querySelector('#scheduleAction');
 const scheduleEnabled = document.querySelector('#scheduleEnabled');
 const schedulePayload = document.querySelector('#schedulePayload');
+const schedulePayloadThumbnail = document.querySelector('#schedulePayloadThumbnail');
+const schedulePayloadUploadYoutube = document.querySelector('#schedulePayloadUploadYoutube');
 const scheduleNotes = document.querySelector('#scheduleNotes');
 const scheduleNewBtn = document.querySelector('#scheduleNewBtn');
 const scheduleDeleteBtn = document.querySelector('#scheduleDeleteBtn');
@@ -2045,6 +2462,11 @@ const scheduleLog = document.querySelector('#scheduleLog');
 const scheduleWorkerStatus = document.querySelector('#scheduleWorkerStatus');
 const scheduleWorkerMeta = document.querySelector('#scheduleWorkerMeta');
 const scheduleWorkerCheckBtn = document.querySelector('#scheduleWorkerCheckBtn');
+const jobAction = document.querySelector('#jobAction');
+const jobActionPayload = document.querySelector('#jobActionPayload');
+const jobActionRunBtn = document.querySelector('#jobActionRunBtn');
+const jobActionResetBtn = document.querySelector('#jobActionResetBtn');
+const jobActionLog = document.querySelector('#jobActionLog');
 let dashboardSchedule = { items: [] };
 let activeScheduleWeekday = new Date().getDay();
 let shouldAutoScrollScheduleToNow = false;
@@ -2136,9 +2558,101 @@ function scheduleRecurrenceLabel(value) {
 function scheduleActionDefinition(value) {
   return scheduleActions.find((entry) => entry.value === value) || scheduleActions[0];
 }
-function scheduleActionDefaultPayload(value) {
-  const definition = scheduleActionDefinition(value);
-  return definition && definition.payload ? JSON.parse(JSON.stringify(definition.payload)) : {};
+function scheduleActionDefaultPayload(action) {
+  const definition = scheduleActionDefinition(action);
+  return definition?.payload ? JSON.parse(JSON.stringify(definition.payload)) : {};
+}
+function readSchedulePayloadJson() {
+  if (!schedulePayload?.value?.trim()) return {};
+  return JSON.parse(schedulePayload.value);
+}
+function selectedSchedulePayloadOptions() {
+  try {
+    const payload = readSchedulePayloadJson();
+    return payload && typeof payload === 'object' && !Array.isArray(payload) && payload.renderOptions && typeof payload.renderOptions === 'object' && !Array.isArray(payload.renderOptions)
+      ? payload.renderOptions
+      : {};
+  } catch {
+    return {};
+  }
+}
+function updateScheduleSavePreview() {
+  if (!scheduleLog || !schedulePayload) return;
+  if (!schedulePayload.value.trim()) {
+    scheduleLog.textContent = 'Payload JSON empty · action default will be used at execution time';
+    return;
+  }
+  try {
+    const payload = readSchedulePayloadJson();
+    const options = payload?.renderOptions || {};
+    scheduleLog.textContent = 'Editing JSON · thumbnail=' + String(options.thumbnail) + ' · uploadYoutube=' + String(options.uploadYoutube) + ' · privacy=' + String(options.youtubePrivacy || '(default)');
+  } catch (error) {
+    scheduleLog.textContent = 'Payload JSON error: ' + error.message;
+  }
+}
+function applySchedulePayloadBoolean(key, checked) {
+  if (!schedulePayload) return;
+  let payload;
+  try {
+    payload = readSchedulePayloadJson();
+  } catch (error) {
+    if (scheduleLog) scheduleLog.textContent = 'Payload JSON error: ' + error.message;
+    return;
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {};
+  if (!payload.renderOptions || typeof payload.renderOptions !== 'object' || Array.isArray(payload.renderOptions)) payload.renderOptions = {};
+  payload.renderOptions[key] = Boolean(checked);
+  schedulePayload.value = JSON.stringify(payload, null, 2);
+  schedulePayload.dataset.actionPreset = '';
+  updateScheduleSavePreview();
+}
+function syncScheduleQuickFieldsFromPayload() {
+  const options = selectedSchedulePayloadOptions();
+  if (schedulePayloadThumbnail) schedulePayloadThumbnail.checked = options.thumbnail !== false;
+  if (schedulePayloadUploadYoutube) schedulePayloadUploadYoutube.checked = options.uploadYoutube === true;
+}
+function markSchedulePayloadCustom() {
+  if (schedulePayload) schedulePayload.dataset.actionPreset = '';
+  syncScheduleQuickFieldsFromPayload();
+  updateScheduleSavePreview();
+}
+function setJobActionPayloadFromPreset() {
+  if (!jobAction || !jobActionPayload) return;
+  jobActionPayload.value = JSON.stringify(scheduleActionDefaultPayload(jobAction.value), null, 2);
+}
+async function runSelectedJobActionNow() {
+  if (!jobAction || !jobActionPayload || !jobActionRunBtn) return;
+  let payload = {};
+  try {
+    payload = jobActionPayload.value.trim() ? JSON.parse(jobActionPayload.value) : {};
+  } catch (error) {
+    if (jobActionLog) jobActionLog.textContent = 'Payload JSON error: ' + error.message;
+    return;
+  }
+  jobActionRunBtn.disabled = true;
+  if (jobActionLog) jobActionLog.textContent = 'Starting job now...';
+  try {
+    const res = await fetch('/api/jobs/run-action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: jobAction.value, payload }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      if (jobActionLog) jobActionLog.textContent = data.error || 'Run failed';
+      return;
+    }
+    currentJobId = data.job.id;
+    renderJob(data.job);
+    clearInterval(pollTimer);
+    pollTimer = setInterval(pollJob, 2000);
+    if (jobActionLog) jobActionLog.textContent = 'Started job #' + data.job.id + '\\n' + JSON.stringify({ action: data.action, outputName: data.job.outputName, command: data.job.command }, null, 2);
+    await refreshJobs();
+  } catch (error) {
+    if (jobActionLog) jobActionLog.textContent = 'Run failed: ' + error.message;
+  } finally {
+    jobActionRunBtn.disabled = false;
+  }
 }
 function scheduleRunsOnDay(item, weekday) {
   return item.recurrence === 'daily' || Number(item.weekday) === Number(weekday);
@@ -2356,6 +2870,7 @@ function resetScheduleForm(hour = 9) {
   schedulePayload.value = ''; schedulePayload.dataset.actionPreset = ''; scheduleNotes.value = ''; scheduleDeleteBtn.disabled = true;
   if (scheduleTitle) scheduleTitle.dataset.actionPreset = '';
   applyScheduleActionPreset(true);
+  syncScheduleQuickFieldsFromPayload();
 }
 function editScheduleItem(id) {
   const item = (dashboardSchedule.items || []).find((entry) => entry.id === id); if (!item) return;
@@ -2364,6 +2879,7 @@ function editScheduleItem(id) {
   scheduleRecurrence.value = item.recurrence || 'weekly'; scheduleWeekday.value = String(item.weekday ?? 1); updateScheduleRecurrenceState();
   scheduleTimes.value = formatScheduleTimes(scheduleTimesForItem(item)); scheduleAction.value = item.action || scheduleActions[0]?.value || 'youtube-marble-long-video';
   scheduleEnabled.checked = item.enabled !== false; schedulePayload.value = item.payload && Object.keys(item.payload).length ? JSON.stringify(item.payload, null, 2) : ''; schedulePayload.dataset.actionPreset = item.action || '';
+  syncScheduleQuickFieldsFromPayload();
   if (scheduleTitle) scheduleTitle.dataset.actionPreset = item.action || '';
   scheduleNotes.value = item.notes || ''; scheduleDeleteBtn.disabled = false; renderSchedule(); scheduleTitle.focus();
 }
@@ -2382,7 +2898,7 @@ async function saveScheduleItem(event) {
   const res = await fetch('/api/schedule', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) });
   const data = await res.json();
   if (!data.ok) { scheduleLog.textContent = data.error || 'Save failed'; return; }
-  dashboardSchedule = data.schedule; activeScheduleWeekday = Number(item.weekday); renderSchedule(); editScheduleItem(id); scheduleLog.textContent = 'Saved ' + item.title + ' · ' + scheduleRecurrenceLabel(item.recurrence) + (item.recurrence === 'daily' ? '' : ' · ' + scheduleDayZh(item.weekday)) + ' · times ' + formatScheduleTimes(times) + ' · background jobs can read /api/schedule';
+  dashboardSchedule = data.schedule; activeScheduleWeekday = Number(item.weekday); renderSchedule(); editScheduleItem(id); scheduleLog.textContent = 'Saved ' + item.title + ' · thumbnail=' + String(payload?.renderOptions?.thumbnail) + ' · uploadYoutube=' + String(payload?.renderOptions?.uploadYoutube) + ' · ' + scheduleRecurrenceLabel(item.recurrence) + (item.recurrence === 'daily' ? '' : ' · ' + scheduleDayZh(item.weekday)) + ' · times ' + formatScheduleTimes(times) + ' · saved to /api/schedule';
 }
 async function deleteScheduleItem() {
   const id = scheduleItemId.value; if (!id) return;
@@ -2393,6 +2909,9 @@ async function deleteScheduleItem() {
   dashboardSchedule = data.schedule; renderSchedule(); resetScheduleForm(); scheduleLog.textContent = 'Deleted item';
 }
 scheduleForm?.addEventListener('submit', saveScheduleItem);
+schedulePayload?.addEventListener('input', markSchedulePayloadCustom);
+schedulePayloadThumbnail?.addEventListener('change', () => applySchedulePayloadBoolean('thumbnail', schedulePayloadThumbnail.checked));
+schedulePayloadUploadYoutube?.addEventListener('change', () => applySchedulePayloadBoolean('uploadYoutube', schedulePayloadUploadYoutube.checked));
 scheduleNewBtn?.addEventListener('click', () => resetScheduleForm());
 scheduleDeleteBtn?.addEventListener('click', deleteScheduleItem);
 scheduleWorkerCheckBtn?.addEventListener('click', dryRunScheduleWorkerCheck);
@@ -2409,6 +2928,7 @@ function applyScheduleActionPreset(force = false) {
   if (!hasDefault || !canReplace) return;
   schedulePayload.value = JSON.stringify(defaultPayload, null, 2);
   schedulePayload.dataset.actionPreset = action;
+  syncScheduleQuickFieldsFromPayload();
   if (scheduleTitle && (!scheduleTitle.value.trim() || scheduleTitle.dataset.actionPreset)) {
     scheduleTitle.value = scheduleActionDefinition(action)?.label || action;
     scheduleTitle.dataset.actionPreset = action;
@@ -2649,6 +3169,10 @@ async function refreshJobs() {
   } catch { jobsListEl.innerHTML = '<p class="muted">Failed to load jobs</p>'; }
 }
 jobsRefreshBtn.onclick = refreshJobs;
+jobAction?.addEventListener('change', setJobActionPayloadFromPreset);
+jobActionResetBtn?.addEventListener('click', setJobActionPayloadFromPreset);
+jobActionRunBtn?.addEventListener('click', runSelectedJobActionNow);
+setJobActionPayloadFromPreset();
 refreshJobs();
 setInterval(refreshJobs, 5000);
 refreshRecordings();
@@ -2751,6 +3275,27 @@ async function handleRequest(req, res) {
     return jsonResponse(res, 200, { ok: true, jobs: Array.from(jobs.values()).map(publicJob).reverse() });
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/jobs/run-action') {
+    try {
+      const body = await readRequestJson(req);
+      const action = String(body.action || '').trim();
+      const actionDefinition = SCHEDULE_ACTIONS.find((entry) => entry.value === action);
+      const result = executeActionPayload({
+        actionDefinition,
+        action,
+        title: actionDefinition?.label || action || 'Run action now',
+        payloadOverride: body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload) ? body.payload : {},
+        dryRun: body.dryRun === true || url.searchParams.get('dryRun') === 'true',
+        source: 'dashboard',
+      });
+      if (result.status === 'failed') return jsonResponse(res, 400, { ok: false, ...result });
+      if (result.status === 'skipped') return jsonResponse(res, 409, { ok: false, ...result });
+      return jsonResponse(res, result.dryRun ? 200 : 202, { ok: true, action, result: { ...result, job: undefined }, job: publicJob(result.job) });
+    } catch (error) {
+      return jsonResponse(res, 400, { ok: false, error: error.message });
+    }
+  }
+
   const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
   if (req.method === 'GET' && jobMatch) {
     const job = jobs.get(decodeURIComponent(jobMatch[1]));
@@ -2771,7 +3316,13 @@ async function handleRequest(req, res) {
       const body = await readRequestJson(req);
       const running = Array.from(jobs.values()).find((job) => job.status === 'running' || job.status === 'stopping');
       if (running) return jsonResponse(res, 409, { ok: false, error: `job ${running.id} is already running` });
-      const options = normalizeOptions(body);
+      const options = normalizeOptions({
+        ...body,
+        dashboardSource: {
+          trigger: 'dashboard-render-form',
+          requestedAt: new Date().toISOString(),
+        },
+      });
       const job = startRender(options);
       return jsonResponse(res, 202, { ok: true, job: publicJob(job) });
     } catch (error) {
