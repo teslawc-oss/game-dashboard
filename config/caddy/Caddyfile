@@ -1,0 +1,11 @@
+{
+	auto_https disable_redirects
+	admin off
+	storage file_system /Users/bert/game-dashboard/data/caddy
+}
+
+itdog.mynetgear.com {
+	reverse_proxy 127.0.0.1:8889 {
+		header_up Host {host}
+	}
+}

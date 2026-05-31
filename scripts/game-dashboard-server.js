@@ -3,7 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import { appendFileSync, copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -79,6 +79,9 @@ const SCHEDULE_RECURRENCES = [
 mkdirSync(recordingsDir, { recursive: true });
 mkdirSync(scheduleDataDir, { recursive: true });
 
+const RENDER_LOCK_PATH = process.env.GAME_DASHBOARD_RENDER_LOCK_PATH || path.join(scheduleDataDir, 'render.lock');
+const RENDER_LOCK_STALE_MS = Math.max(60_000, Number(process.env.GAME_DASHBOARD_RENDER_LOCK_STALE_MS || 12 * 60 * 60_000));
+
 const LOCAL_DASHBOARD_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 function requestHostName(req) {
@@ -98,6 +101,60 @@ function safeEqualString(a, b) {
   const right = Buffer.from(String(b || ''), 'utf8');
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
+
+const AUTH_RATE_LIMIT_WINDOW_MS = Math.max(60_000, Number(process.env.GAME_DASHBOARD_AUTH_RATE_LIMIT_WINDOW_MS || 10 * 60_000));
+const AUTH_RATE_LIMIT_MAX_FAILURES = Math.max(1, Number(process.env.GAME_DASHBOARD_AUTH_RATE_LIMIT_MAX_FAILURES || 5));
+const AUTH_RATE_LIMIT_LOCK_MS = Math.max(60_000, Number(process.env.GAME_DASHBOARD_AUTH_RATE_LIMIT_LOCK_MS || 30 * 60_000));
+const authFailureBuckets = new Map();
+
+function dashboardClientIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const raw = forwarded || req.socket?.remoteAddress || 'unknown';
+  return String(raw).replace(/^::ffff:/, '').slice(0, 80) || 'unknown';
+}
+
+function authBucketFor(req) {
+  const key = dashboardClientIp(req);
+  const now = Date.now();
+  const existing = authFailureBuckets.get(key);
+  if (existing && now - existing.windowStartedAt <= AUTH_RATE_LIMIT_WINDOW_MS) return { key, bucket: existing, now };
+  const bucket = { failures: 0, windowStartedAt: now, lockedUntil: existing?.lockedUntil && existing.lockedUntil > now ? existing.lockedUntil : 0 };
+  authFailureBuckets.set(key, bucket);
+  return { key, bucket, now };
+}
+
+function authRateLimitStatus(req) {
+  const { bucket, now } = authBucketFor(req);
+  if (bucket.lockedUntil > now) {
+    return { blocked: true, retryAfterSeconds: Math.max(1, Math.ceil((bucket.lockedUntil - now) / 1000)) };
+  }
+  return { blocked: false, retryAfterSeconds: 0 };
+}
+
+function recordAuthFailure(req) {
+  const { bucket, now } = authBucketFor(req);
+  bucket.failures += 1;
+  if (bucket.failures >= AUTH_RATE_LIMIT_MAX_FAILURES) {
+    bucket.lockedUntil = now + AUTH_RATE_LIMIT_LOCK_MS;
+  }
+  return {
+    failures: bucket.failures,
+    locked: bucket.lockedUntil > now,
+    retryAfterSeconds: bucket.lockedUntil > now ? Math.ceil((bucket.lockedUntil - now) / 1000) : 0,
+  };
+}
+
+function resetAuthFailures(req) {
+  authFailureBuckets.delete(dashboardClientIp(req));
+}
+
+function pruneAuthFailureBuckets() {
+  const now = Date.now();
+  for (const [key, bucket] of authFailureBuckets.entries()) {
+    if (bucket.lockedUntil <= now && now - bucket.windowStartedAt > AUTH_RATE_LIMIT_WINDOW_MS) authFailureBuckets.delete(key);
+  }
+}
+setInterval(pruneAuthFailureBuckets, Math.min(AUTH_RATE_LIMIT_WINDOW_MS, 5 * 60_000)).unref();
 
 function hasValidDashboardPassword(req) {
   const header = String(req.headers.authorization || '');
@@ -125,7 +182,30 @@ function requireDashboardAuth(req, res) {
     res.end('Remote dashboard access is disabled until GAME_DASHBOARD_PASSWORD is configured.\n');
     return false;
   }
-  if (hasValidDashboardPassword(req)) return true;
+  const rateLimit = authRateLimitStatus(req);
+  if (rateLimit.blocked) {
+    res.writeHead(429, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': String(rateLimit.retryAfterSeconds),
+    });
+    res.end('Too many failed login attempts. Try again later.\n');
+    return false;
+  }
+  if (hasValidDashboardPassword(req)) {
+    resetAuthFailures(req);
+    return true;
+  }
+  const failure = recordAuthFailure(req);
+  if (failure.locked) {
+    res.writeHead(429, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': String(failure.retryAfterSeconds),
+    });
+    res.end('Too many failed login attempts. Try again later.\n');
+    return false;
+  }
   res.writeHead(401, {
     'www-authenticate': 'Basic realm="Game Dashboard", charset="UTF-8"',
     'content-type': 'text/plain; charset=utf-8',
@@ -194,6 +274,7 @@ const SCHEDULE_ACTIONS = [
         crf: 18,
         captureScale: 1,
         videoPreset: 'veryfast',
+        headful: true,
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -236,6 +317,7 @@ const SCHEDULE_ACTIONS = [
         crf: 18,
         captureScale: 1,
         videoPreset: 'veryfast',
+        headful: true,
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -509,9 +591,31 @@ function loadSchedule() {
 
 function saveSchedule(schedule) {
   const normalized = normalizeSchedule(schedule);
-  writeFileSync(schedulePath, `${JSON.stringify(normalized, null, 2)}
-`);
+  writeFileSync(schedulePath, `${JSON.stringify(normalized, null, 2)}\n`);
   return normalized;
+}
+
+function scheduleActionLatestPayloadOverrides() {
+  const latestByAction = new Map();
+  const schedule = loadSchedule();
+  for (const item of schedule.items || []) {
+    if (!item?.action || !item.payload || typeof item.payload !== 'object' || Array.isArray(item.payload)) continue;
+    const current = latestByAction.get(item.action);
+    const itemUpdatedAt = Date.parse(item.updatedAt || item.createdAt || 0) || 0;
+    const currentUpdatedAt = Date.parse(current?.updatedAt || current?.createdAt || 0) || 0;
+    if (!current || itemUpdatedAt >= currentUpdatedAt) {
+      latestByAction.set(item.action, item);
+    }
+  }
+  return Object.fromEntries(Array.from(latestByAction.entries()).map(([action, item]) => [
+    action,
+    {
+      itemId: item.id,
+      title: item.title,
+      updatedAt: item.updatedAt || item.createdAt || null,
+      payload: JSON.parse(JSON.stringify(item.payload || {})),
+    },
+  ]));
 }
 
 function defaultScheduleRunState() {
@@ -628,7 +732,7 @@ function calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRa
   const raceCount = estimateRaceCount(recordMode, multipleRaceCount);
   const nonRaceSeconds = estimateNonRaceSeconds(recordMode, raceCount);
   const raceSeconds = Math.max(35, (targetSeconds - nonRaceSeconds) / raceCount);
-  const metersPerSecond = 4.6;
+  const metersPerSecond = recordMode === 'continuous' && raceCount === 1 ? 1.45 : 4.6;
   return Math.max(80, Math.min(3000, Math.round((raceSeconds * metersPerSecond) / 10) * 10));
 }
 
@@ -641,7 +745,9 @@ function normalizeOptions(input = {}) {
   const allowedTypes = new Set(OBSTACLE_TYPES.map((item) => item.value));
   const obstacleTypes = requestedTypes.filter((type) => allowedTypes.has(type));
   const format = input.format === 'webm' ? 'webm' : 'mp4';
-  const videoCapture = input.videoCapture === 'playwright' ? 'playwright' : 'canvas';
+  const videoCapture = ['playwright', 'canvas', 'none', 'off', 'false'].includes(String(input.videoCapture || '').toLowerCase())
+    ? ({ off: 'none', false: 'none' }[String(input.videoCapture || '').toLowerCase()] || String(input.videoCapture || '').toLowerCase())
+    : 'canvas';
   const cupSize = Math.max(2, Math.min(99, Math.round(Number(input.cupSize) || 12)));
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const renderPerformanceProfile = input.renderPerformanceProfile === 'turbo60' ? 'turbo60' : 'turbo60';
@@ -654,10 +760,11 @@ function normalizeOptions(input = {}) {
   const lengthMode = input.lengthMode === 'fixed-track' ? 'fixed-track' : 'target-duration';
   const targetMinutes = clampNumber(input.targetMinutes, 1, 120, CUP_VIDEO_DEFAULTS.targetMinutes);
   const targetSeconds = Math.round(targetMinutes * 60);
+  const hasExplicitTrackLength = input.trackLength !== undefined && input.trackLength !== null && input.trackLength !== '';
   const manualTrackLength = Math.max(80, Math.min(3000, Math.round(Number(input.trackLength) || CUP_VIDEO_DEFAULTS.trackLength)));
-  const trackLength = lengthMode === 'target-duration'
-    ? calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRaceCount })
-    : manualTrackLength;
+  const trackLength = hasExplicitTrackLength
+    ? manualTrackLength
+    : calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRaceCount });
   const maxRaceSeconds = estimateMaxRaceSecondsForTrackLength(trackLength);
   const videoCanvasLayout = String(input.videoCanvasLayout || 'horizontal').toLowerCase() === 'vertical' ? 'vertical' : 'horizontal';
   const defaultCanvasSize = videoCanvasLayout === 'vertical'
@@ -676,6 +783,8 @@ function normalizeOptions(input = {}) {
     ? Math.max(120, Math.min(7200, requestedTimeout))
     : Math.max(120, Math.min(7200, dynamicTimeout));
   const audio = input.audio !== false;
+  const headful = input.headful === true || String(input.headful || '').toLowerCase() === 'true';
+  const browserWindowPosition = String(input.browserWindowPosition || '').replace(/[^\d,-]/g, '').slice(0, 32);
   const thumbnail = input.thumbnail !== false;
   const uploadYoutube = input.uploadYoutube === true;
   const youtubePrivacy = ['private', 'unlisted', 'public'].includes(String(input.youtubePrivacy || '').toLowerCase())
@@ -736,6 +845,8 @@ function normalizeOptions(input = {}) {
     },
     stageTrackLabel: `Unified ${trackLength}m`,
     audio,
+    headful,
+    browserWindowPosition,
     thumbnail,
     uploadYoutube,
     youtubePrivacy,
@@ -1018,6 +1129,7 @@ function generateThumbnailTest(input = {}) {
 function collectStaleRenderProcessCleanup(options = {}) {
   const renderPort = Number(options.renderPort || 0);
   const includeHeadlessChrome = options.includeHeadlessChrome !== false;
+  const includeOrphanDashboardServers = options.includeOrphanDashboardServers === true;
   const snapshot = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], {
     encoding: 'utf8',
     timeout: 2500,
@@ -1054,6 +1166,7 @@ function collectStaleRenderProcessCleanup(options = {}) {
   }
   const rootCandidates = rows.filter((row) => {
     if (row.pid === process.pid) return false;
+    if (includeOrphanDashboardServers && row.ppid === 1 && /(?:^|\s)(?:node\s+)?(?:scripts\/game-dashboard-server\.js|\/game-dashboard\/scripts\/game-dashboard-server\.js)\b/i.test(row.command)) return true;
     if (/\bvite\s+preview\b/i.test(row.command)) return true;
     if (renderPortPids.has(row.pid)) return true;
     if (!includeHeadlessChrome) return false;
@@ -1106,6 +1219,7 @@ function collectStaleRenderProcessCleanup(options = {}) {
     capturedAt: new Date().toISOString(),
     renderPort: Number.isFinite(renderPort) && renderPort > 0 ? renderPort : null,
     includeHeadlessChrome,
+    includeOrphanDashboardServers,
     renderPortPids: [...renderPortPids],
     candidates: candidates.map((row) => ({ pid: row.pid, ppid: row.ppid, command: row.command })),
     killed,
@@ -1128,6 +1242,7 @@ function startRender(options) {
   const youtubeMetadata = path.join(bundleDir, `${outputBaseName}.youtube.json`);
   const youtubeUpload = path.join(bundleDir, `${outputBaseName}.youtube-upload.json`);
   const renderLog = path.join(bundleDir, `${outputBaseName}.log`);
+  const audioOutput = path.join(bundleDir, `${outputBaseName}.wav`);
   const renderPort = nextRenderPort++;
   const renderUrl = `http://127.0.0.1:${renderPort}`;
   const baseRenderArgs = splitCommand(activeGame.render.command);
@@ -1157,6 +1272,7 @@ function startRender(options) {
     `--upload-youtube=${options.uploadYoutube ? 'true' : 'false'}`,
     `--youtube-privacy=${options.youtubePrivacy}`,
     `--youtube-upload-output=${youtubeUpload}`,
+    `--audio-output=${audioOutput}`,
     `--video-capture=${options.videoCapture}`,
     `--video-canvas=${options.videoCanvasLayout || 'horizontal'}`,
     '--thumbnail-frame-strategy=mid-highlight',
@@ -1168,6 +1284,8 @@ function startRender(options) {
   if (options.thumbnailTitle) renderExtraArgs.push(`--thumbnail-title=${options.thumbnailTitle}`);
   if (options.obstacleTypes.length) renderExtraArgs.push(`--obstacle-types=${options.obstacleTypes.join(',')}`);
   if (!options.audio) renderExtraArgs.push('--audio=false');
+  if (options.headful) renderExtraArgs.push('--headful=true');
+  if (options.browserWindowPosition) renderExtraArgs.push(`--browser-window-position=${options.browserWindowPosition}`);
   const [renderBin, ...renderBaseRest] = baseRenderArgs;
   // Insert -- separator for npm run so extra args reach the script (only if not already present)
   const needsNpmSeparator = (renderBaseRest.includes('run') || renderBaseRest.includes('exec')) && !renderBaseRest.includes('--');
@@ -1190,11 +1308,14 @@ function startRender(options) {
     youtubeMetadata,
     youtubeUpload,
     renderLog,
+    audioOutput,
     renderPort,
     command: `${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`,
     log: options.dryRun ? `[dry-run] Would run from ${rootDir}\n[dry-run] ${`${renderBin || 'npm'} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`}\n` : '',
     error: null,
     child: null,
+    renderLockAcquired: false,
+    renderLock: null,
   };
   jobs.set(id, job);
 
@@ -1207,6 +1328,26 @@ function startRender(options) {
   if (options.scheduleSource) {
     updateScheduleRunDiagnostics(job, 'preRenderProcessCleanup', staleVitePreviewCleanup);
   }
+  const lockResult = acquireRenderLock({
+    jobId: job.id,
+    source: options.scheduleSource ? 'schedule' : 'dashboard',
+    runKey: options.scheduleSource?.runKey || null,
+    outputTitle: outputBaseName,
+  });
+  job.renderLock = lockResult;
+  const lockLog = `[dashboard] render lock ${JSON.stringify(lockResult, null, 2)}\n`;
+  job.log += lockLog;
+  appendFileSync(renderLog, lockLog);
+  if (options.scheduleSource) updateScheduleRunDiagnostics(job, 'renderLock', lockResult);
+  if (!lockResult.ok) {
+    job.status = options.dryRun ? 'completed' : 'failed';
+    job.exitCode = options.dryRun ? 0 : null;
+    job.error = options.dryRun ? null : `another render is already locked by pid ${lockResult.existing?.pid || 'unknown'}`;
+    job.finishedAt = new Date().toISOString();
+    if (options.scheduleSource) updateScheduleRunForJob(job);
+    return job;
+  }
+  job.renderLockAcquired = true;
   if (options.scheduleSource) {
     const preflight = collectScheduleRenderPreflight(job);
     job.schedulePreflight = preflight;
@@ -1216,6 +1357,7 @@ function startRender(options) {
     updateScheduleRunDiagnostics(job, 'preflight', preflight);
   }
   if (options.dryRun) {
+    removeRenderLockIfOwned(job);
     writeFileSync(renderLog, job.log);
     return job;
   }
@@ -1229,6 +1371,7 @@ function startRender(options) {
   child.unref();
   job.child = child;
   if (options.scheduleSource) {
+    startScheduleDuringCaptureSnapshots(job, { intervalMs: 30_000 });
     setTimeout(() => {
       if (!jobs.has(job.id)) return;
       const postSpawn = collectScheduleRenderDiagnostics(job, {
@@ -1253,11 +1396,15 @@ function startRender(options) {
   child.stdout.on('data', append);
   child.stderr.on('data', append);
   child.on('error', (error) => {
+    stopScheduleDuringCaptureSnapshots(job);
+    removeRenderLockIfOwned(job);
     job.status = 'failed';
     job.error = error.message;
     job.finishedAt = new Date().toISOString();
   });
   child.on('exit', (code, signal) => {
+    stopScheduleDuringCaptureSnapshots(job);
+    removeRenderLockIfOwned(job);
     job.exitCode = code;
     job.signal = signal;
     job.finishedAt = new Date().toISOString();
@@ -1434,6 +1581,8 @@ function updateScheduleRunForJob(job) {
     youtubeUploadExists: Boolean(youtubeUploadPath && existsSync(youtubeUploadPath)),
     preflight: job.schedulePreflight || runs[index].preflight || null,
     postSpawn: job.schedulePostSpawn || runs[index].postSpawn || null,
+    renderLock: job.renderLock || runs[index].renderLock || null,
+    duringCaptureSnapshots: job.scheduleDuringCaptureSnapshots || runs[index].duringCaptureSnapshots || [],
   };
   state.runs = runs;
   return saveScheduleRunState(state);
@@ -1449,6 +1598,22 @@ function updateScheduleRunDiagnostics(job, field, diagnostics) {
   runs[index] = {
     ...runs[index],
     [field]: diagnostics,
+  };
+  state.runs = runs;
+  return saveScheduleRunState(state);
+}
+
+function appendScheduleRunDiagnostics(job, field, diagnostics, { limit = 20 } = {}) {
+  const source = job?.options?.scheduleSource;
+  if (!source?.runId || !field) return null;
+  const state = loadScheduleRunState();
+  const runs = Array.isArray(state.runs) ? state.runs : [];
+  const index = runs.findIndex((run) => run.id === source.runId || (run.jobId === job.id && run.runKey === source.runKey));
+  if (index < 0) return null;
+  const existing = Array.isArray(runs[index][field]) ? runs[index][field] : [];
+  runs[index] = {
+    ...runs[index],
+    [field]: [...existing, diagnostics].slice(-Math.max(1, Number(limit) || 20)),
   };
   state.runs = runs;
   return saveScheduleRunState(state);
@@ -1470,34 +1635,83 @@ function runCommandSnapshot(command, args = [], { timeoutMs = 1500, maxChars = 2
   }
 }
 
-function summarizeProcessSnapshot(output = '', { childPid = null } = {}) {
+function parsePsSnapshot(output = '') {
   const lines = String(output || '').split(/\r?\n/).filter(Boolean);
   const header = lines[0] || '';
   const rows = lines.slice(1).map((line) => line.trim()).filter(Boolean);
-  const childPidText = childPid ? String(childPid) : null;
-  const interesting = rows.filter((line) => /render-auto-cup|game-dashboard-server|vite(?: |$)|vite preview|Google Chrome|Chrome Helper|Chromium|ffmpeg|node|npm/i.test(line)
-    || (childPidText && new RegExp(`^${childPidText}\\b|^\\S+\\s+${childPidText}\\b`).test(line)));
+  const entries = rows.map((line) => {
+    const match = line.match(/^(\d+)\s+(\d+)\s+([0-9.]+)\s+([0-9.]+)\s+(\S+)\s+(.*)$/);
+    if (!match) return null;
+    return {
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      cpu: Number(match[3]),
+      mem: Number(match[4]),
+      etime: match[5],
+      command: match[6],
+      line,
+    };
+  }).filter(Boolean);
+  return { header, rows, entries };
+}
+
+function summarizeProcessSnapshot(output = '', { childPid = null } = {}) {
+  const { header, rows, entries } = parsePsSnapshot(output);
+  const childPidNumber = Number(childPid || 0);
+  const byParent = new Map();
+  for (const entry of entries) {
+    if (!byParent.has(entry.ppid)) byParent.set(entry.ppid, []);
+    byParent.get(entry.ppid).push(entry);
+  }
+  const descendantPids = new Set();
+  const queue = childPidNumber ? [childPidNumber] : [];
+  while (queue.length) {
+    const pid = queue.shift();
+    if (descendantPids.has(pid)) continue;
+    descendantPids.add(pid);
+    for (const child of byParent.get(pid) || []) queue.push(child.pid);
+  }
+  const interestingRegex = /render-auto-cup|game-dashboard-server|vite(?: |$)|vite preview|Google Chrome|Chrome Helper|Chromium|ffmpeg|node|npm|playwright/i;
+  const interesting = entries.filter((entry) => interestingRegex.test(entry.command) || descendantPids.has(entry.pid) || descendantPids.has(entry.ppid));
   const counts = {
     totalRows: rows.length,
     interesting: interesting.length,
-    renderAutoCup: interesting.filter((line) => /render-auto-cup/i.test(line)).length,
-    vite: interesting.filter((line) => /vite/i.test(line)).length,
-    chrome: interesting.filter((line) => /Google Chrome|Chrome Helper|Chromium/i.test(line)).length,
-    ffmpeg: interesting.filter((line) => /ffmpeg/i.test(line)).length,
-    node: interesting.filter((line) => /node/i.test(line)).length,
-    npm: interesting.filter((line) => /npm/i.test(line)).length,
+    descendants: Math.max(0, descendantPids.size - (childPidNumber ? 1 : 0)),
+    renderAutoCup: interesting.filter((entry) => /render-auto-cup/i.test(entry.command)).length,
+    vite: interesting.filter((entry) => /vite/i.test(entry.command)).length,
+    chrome: interesting.filter((entry) => /Google Chrome|Chrome Helper|Chromium/i.test(entry.command)).length,
+    ffmpeg: interesting.filter((entry) => /ffmpeg/i.test(entry.command)).length,
+    node: interesting.filter((entry) => /node/i.test(entry.command)).length,
+    npm: interesting.filter((entry) => /npm/i.test(entry.command)).length,
   };
+  const toLine = (entry) => `${entry.line}${descendantPids.has(entry.pid) ? ' [render-descendant]' : ''}`;
   const topCpu = [...interesting]
-    .sort((a, b) => Number((b.match(/^\S+\s+\S+\s+([0-9.]+)/) || [])[1] || 0) - Number((a.match(/^\S+\s+\S+\s+([0-9.]+)/) || [])[1] || 0))
-    .slice(0, 40);
-  const childTree = childPidText
-    ? rows.filter((line) => new RegExp(`^${childPidText}\\b|^\\S+\\s+${childPidText}\\b`).test(line)).slice(0, 40)
+    .sort((a, b) => b.cpu - a.cpu)
+    .slice(0, 60)
+    .map(toLine);
+  const globalTopCpu = [...entries]
+    .sort((a, b) => b.cpu - a.cpu)
+    .slice(0, 30)
+    .map(toLine);
+  const childTree = childPidNumber
+    ? [...entries]
+      .filter((entry) => descendantPids.has(entry.pid))
+      .sort((a, b) => (a.ppid - b.ppid) || (a.pid - b.pid))
+      .slice(0, 120)
+      .map(toLine)
     : [];
-  return { header, counts, topCpu, childPid: childPid || null, childTree };
+  const descendantTotals = [...entries]
+    .filter((entry) => descendantPids.has(entry.pid))
+    .reduce((acc, entry) => {
+      acc.cpu = Number((acc.cpu + entry.cpu).toFixed(1));
+      acc.mem = Number((acc.mem + entry.mem).toFixed(1));
+      return acc;
+    }, { cpu: 0, mem: 0 });
+  return { header, counts, topCpu, globalTopCpu, childPid: childPid || null, childTree, descendantTotals };
 }
 
 function collectScheduleRenderDiagnostics(job = {}, { reason = 'schedule-render-preflight', childPid = null } = {}) {
-  const ps = runCommandSnapshot('ps', ['-axo', 'pid,ppid,pcpu,pmem,etime,lstart,command'], { timeoutMs: 2500, maxChars: 90000 });
+  const ps = runCommandSnapshot('ps', ['-axo', 'pid,ppid,pcpu,pmem,etime,command'], { timeoutMs: 2500, maxChars: 120000 });
   const top = runCommandSnapshot('sh', ['-lc', 'top -l 1 -stats pid,command,cpu,mem,time -o cpu -n 30 2>/dev/null'], { timeoutMs: 4000, maxChars: 30000 });
   const uptime = runCommandSnapshot('uptime', [], { timeoutMs: 1000, maxChars: 2000 });
   const vmStat = runCommandSnapshot('vm_stat', [], { timeoutMs: 1000, maxChars: 5000 });
@@ -1506,7 +1720,7 @@ function collectScheduleRenderDiagnostics(job = {}, { reason = 'schedule-render-
   const listeningPorts = runCommandSnapshot('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN'], { timeoutMs: 2500, maxChars: 40000 });
   const matchingPorts = listeningPorts.output.split(/\r?\n/).filter((line) => /:(?:43\d\d|517\d|8888)\b/.test(line)).slice(0, 100);
   const renderPortUsers = job.renderPort
-    ? runCommandSnapshot('lsof', ['-nP', '-iTCP', `:${job.renderPort}`], { timeoutMs: 2000, maxChars: 12000 })
+    ? runCommandSnapshot('lsof', ['-nP', `-iTCP:${job.renderPort}`], { timeoutMs: 2000, maxChars: 12000 })
     : null;
   const childTree = childPid
     ? runCommandSnapshot('pgrep', ['-P', String(childPid), '-l'], { timeoutMs: 1000, maxChars: 6000 })
@@ -1605,6 +1819,53 @@ function collectScheduleRenderPreflight(job = {}) {
   return collectScheduleRenderDiagnostics(job, { reason: 'schedule-render-preflight' });
 }
 
+function collectScheduleDuringCaptureSnapshot(job = {}, { sequence = 0 } = {}) {
+  const childPid = job.child?.pid || null;
+  const diagnostics = collectScheduleRenderDiagnostics(job, {
+    reason: 'schedule-render-during-capture',
+    childPid,
+  });
+  return {
+    ...diagnostics,
+    sequence,
+    jobElapsedSeconds: job.startedAt ? Math.round((Date.now() - Date.parse(job.startedAt)) / 1000) : null,
+  };
+}
+
+function recordScheduleDuringCaptureSnapshot(job, snapshot) {
+  if (!job || !snapshot) return;
+  if (!Array.isArray(job.scheduleDuringCaptureSnapshots)) job.scheduleDuringCaptureSnapshots = [];
+  job.scheduleDuringCaptureSnapshots.push(snapshot);
+  job.scheduleDuringCaptureSnapshots = job.scheduleDuringCaptureSnapshots.slice(-20);
+  const snapshotLog = formatScheduleDiagnosticsLog('schedule render during-capture', snapshot);
+  job.log += snapshotLog;
+  appendFileSync(job.renderLog, snapshotLog);
+  appendScheduleRunDiagnostics(job, 'duringCaptureSnapshots', snapshot, { limit: 20 });
+  if (job.log.length > 60000) job.log = job.log.slice(-60000);
+}
+
+function startScheduleDuringCaptureSnapshots(job, { intervalMs = 60_000 } = {}) {
+  if (!job?.options?.scheduleSource) return null;
+  let sequence = 0;
+  const tick = () => {
+    if (!jobs.has(job.id) || job.status !== 'running') return;
+    sequence += 1;
+    const snapshot = collectScheduleDuringCaptureSnapshot(job, { sequence });
+    recordScheduleDuringCaptureSnapshot(job, snapshot);
+  };
+  const timer = setInterval(tick, Math.max(10_000, Number(intervalMs) || 60_000));
+  timer.unref?.();
+  job.scheduleDuringCaptureTimer = timer;
+  return timer;
+}
+
+function stopScheduleDuringCaptureSnapshots(job) {
+  if (job?.scheduleDuringCaptureTimer) {
+    clearInterval(job.scheduleDuringCaptureTimer);
+    job.scheduleDuringCaptureTimer = null;
+  }
+}
+
 function formatScheduleDiagnosticsLog(label, diagnostics = {}) {
   return `[dashboard] ${label} ${JSON.stringify(diagnostics, null, 2)}\n`;
 }
@@ -1633,6 +1894,75 @@ function publicScheduleWorkerStatus() {
 
 function findRunningRenderJob() {
   return Array.from(jobs.values()).find((job) => job.status === 'running' || job.status === 'stopping');
+}
+
+function isProcessAlive(pid) {
+  const numericPid = Number(pid || 0);
+  if (!Number.isFinite(numericPid) || numericPid <= 0) return false;
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeRenderLockIfOwned(job) {
+  if (!job?.renderLockAcquired) return false;
+  try {
+    const lock = JSON.parse(readFileSync(RENDER_LOCK_PATH, 'utf8'));
+    if (lock.jobId !== job.id || lock.pid !== process.pid) return false;
+    rmSync(RENDER_LOCK_PATH, { force: true });
+    job.renderLockAcquired = false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireRenderLock({ jobId, source = 'dashboard', runKey = null, outputTitle = null } = {}) {
+  const now = new Date();
+  const lock = {
+    jobId,
+    source,
+    runKey,
+    outputTitle,
+    pid: process.pid,
+    host: HOST,
+    port: PORT,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  };
+  try {
+    const fd = openSync(RENDER_LOCK_PATH, 'wx');
+    try {
+      writeFileSync(fd, JSON.stringify(lock, null, 2));
+    } finally {
+      closeSync(fd);
+    }
+    return { ok: true, lock, staleRemoved: null };
+  } catch (error) {
+    if (error.code !== 'EEXIST') return { ok: false, error: error.message, lock: null, existing: null };
+  }
+
+  let existing = null;
+  try {
+    existing = JSON.parse(readFileSync(RENDER_LOCK_PATH, 'utf8'));
+  } catch (error) {
+    existing = { unreadable: true, error: error.message };
+  }
+  const ageMs = Number.isFinite(Date.parse(existing?.createdAt)) ? now - Date.parse(existing.createdAt) : Infinity;
+  const ownerAlive = isProcessAlive(existing?.pid);
+  if (!ownerAlive || ageMs > RENDER_LOCK_STALE_MS || existing?.unreadable) {
+    try {
+      rmSync(RENDER_LOCK_PATH, { force: true });
+      const retry = acquireRenderLock({ jobId, source, runKey, outputTitle });
+      return { ...retry, staleRemoved: { existing, ownerAlive, ageMs } };
+    } catch (error) {
+      return { ok: false, error: error.message, lock: null, existing, ownerAlive, ageMs };
+    }
+  }
+  return { ok: false, reason: 'render-lock-held', lock: null, existing, ownerAlive, ageMs };
 }
 
 function executeScheduleAction(item, slot, { dryRun = false } = {}) {
@@ -2375,7 +2705,14 @@ function dashboardHtml() {
           <label class="check"><input id="scheduleEnabled" type="checkbox" checked> <span>Enabled</span></label>
           <div class="form-grid">
             <label class="check"><input id="schedulePayloadThumbnail" type="checkbox" checked> <span>Generate thumbnail（寫入 Payload JSON）</span></label>
-            <label class="check"><input id="schedulePayloadUploadYoutube" type="checkbox" checked> <span>Upload YouTube（寫入 Payload JSON）</span></label>
+            <div>
+              <label for="schedulePayloadYoutubeUploadMode">YouTube upload</label>
+              <select id="schedulePayloadYoutubeUploadMode">
+                <option value="off">No upload（安全）</option>
+                <option value="private">Upload Private</option>
+                <option value="public">Upload Public</option>
+              </select>
+            </div>
           </div>
           <label for="schedulePayload">Payload JSON（比之後 background job 用）</label>
           <textarea id="schedulePayload" spellcheck="false" placeholder='{"game":"marble-rush"}'></textarea>
@@ -2440,6 +2777,7 @@ const dashboardThumbnailPresetTitles = ${JSON.stringify(THUMBNAIL_TITLE_PRESETS)
 const scheduleWeekdays = ${JSON.stringify(SCHEDULE_WEEKDAYS)};
 const scheduleRecurrences = ${JSON.stringify(SCHEDULE_RECURRENCES)};
 const scheduleActions = ${JSON.stringify(SCHEDULE_ACTIONS)};
+const scheduleActionLatestPayloads = ${JSON.stringify(scheduleActionLatestPayloadOverrides())};
 const scheduleGrid = document.querySelector('#scheduleGrid');
 const scheduleWeekTabs = document.querySelector('#scheduleWeekTabs');
 const scheduleStatus = document.querySelector('#scheduleStatus');
@@ -2454,7 +2792,7 @@ const scheduleAction = document.querySelector('#scheduleAction');
 const scheduleEnabled = document.querySelector('#scheduleEnabled');
 const schedulePayload = document.querySelector('#schedulePayload');
 const schedulePayloadThumbnail = document.querySelector('#schedulePayloadThumbnail');
-const schedulePayloadUploadYoutube = document.querySelector('#schedulePayloadUploadYoutube');
+const schedulePayloadYoutubeUploadMode = document.querySelector('#schedulePayloadYoutubeUploadMode');
 const scheduleNotes = document.querySelector('#scheduleNotes');
 const scheduleNewBtn = document.querySelector('#scheduleNewBtn');
 const scheduleDeleteBtn = document.querySelector('#scheduleDeleteBtn');
@@ -2558,9 +2896,27 @@ function scheduleRecurrenceLabel(value) {
 function scheduleActionDefinition(value) {
   return scheduleActions.find((entry) => entry.value === value) || scheduleActions[0];
 }
+function deepMergePayload(base = {}, override = {}) {
+  const merged = {
+    ...(base || {}),
+    ...(override || {}),
+    renderOptions: {
+      ...((base || {}).renderOptions || {}),
+      ...((override || {}).renderOptions || {}),
+    },
+  };
+  if (!Object.keys(merged.renderOptions || {}).length) delete merged.renderOptions;
+  return merged;
+}
 function scheduleActionDefaultPayload(action) {
   const definition = scheduleActionDefinition(action);
-  return definition?.payload ? JSON.parse(JSON.stringify(definition.payload)) : {};
+  const basePayload = definition?.payload ? JSON.parse(JSON.stringify(definition.payload)) : {};
+  const latest = scheduleActionLatestPayloads?.[definition?.value || action];
+  return latest?.payload ? deepMergePayload(basePayload, latest.payload) : basePayload;
+}
+function scheduleActionLatestPayloadMeta(action) {
+  const definition = scheduleActionDefinition(action);
+  return scheduleActionLatestPayloads?.[definition?.value || action] || null;
 }
 function readSchedulePayloadJson() {
   if (!schedulePayload?.value?.trim()) return {};
@@ -2590,7 +2946,7 @@ function updateScheduleSavePreview() {
     scheduleLog.textContent = 'Payload JSON error: ' + error.message;
   }
 }
-function applySchedulePayloadBoolean(key, checked) {
+function applySchedulePayloadRenderOption(key, value) {
   if (!schedulePayload) return;
   let payload;
   try {
@@ -2601,15 +2957,40 @@ function applySchedulePayloadBoolean(key, checked) {
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {};
   if (!payload.renderOptions || typeof payload.renderOptions !== 'object' || Array.isArray(payload.renderOptions)) payload.renderOptions = {};
-  payload.renderOptions[key] = Boolean(checked);
+  payload.renderOptions[key] = value;
   schedulePayload.value = JSON.stringify(payload, null, 2);
   schedulePayload.dataset.actionPreset = '';
   updateScheduleSavePreview();
 }
+function applySchedulePayloadBoolean(key, checked) {
+  applySchedulePayloadRenderOption(key, Boolean(checked));
+}
+function applyScheduleYoutubeUploadMode(mode) {
+  const normalized = ['private', 'public'].includes(String(mode)) ? String(mode) : 'off';
+  if (!schedulePayload) return;
+  let payload;
+  try {
+    payload = readSchedulePayloadJson();
+  } catch (error) {
+    if (scheduleLog) scheduleLog.textContent = 'Payload JSON error: ' + error.message;
+    return;
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {};
+  if (!payload.renderOptions || typeof payload.renderOptions !== 'object' || Array.isArray(payload.renderOptions)) payload.renderOptions = {};
+  payload.renderOptions.uploadYoutube = normalized !== 'off';
+  payload.renderOptions.youtubePrivacy = normalized === 'public' ? 'public' : 'private';
+  schedulePayload.value = JSON.stringify(payload, null, 2);
+  schedulePayload.dataset.actionPreset = '';
+  updateScheduleSavePreview();
+}
+function scheduleYoutubeUploadModeFromOptions(options = {}) {
+  if (options.uploadYoutube !== true) return 'off';
+  return String(options.youtubePrivacy || '').toLowerCase() === 'public' ? 'public' : 'private';
+}
 function syncScheduleQuickFieldsFromPayload() {
   const options = selectedSchedulePayloadOptions();
   if (schedulePayloadThumbnail) schedulePayloadThumbnail.checked = options.thumbnail !== false;
-  if (schedulePayloadUploadYoutube) schedulePayloadUploadYoutube.checked = options.uploadYoutube === true;
+  if (schedulePayloadYoutubeUploadMode) schedulePayloadYoutubeUploadMode.value = scheduleYoutubeUploadModeFromOptions(options);
 }
 function markSchedulePayloadCustom() {
   if (schedulePayload) schedulePayload.dataset.actionPreset = '';
@@ -2619,6 +3000,12 @@ function markSchedulePayloadCustom() {
 function setJobActionPayloadFromPreset() {
   if (!jobAction || !jobActionPayload) return;
   jobActionPayload.value = JSON.stringify(scheduleActionDefaultPayload(jobAction.value), null, 2);
+  const latest = scheduleActionLatestPayloadMeta(jobAction.value);
+  if (jobActionLog) {
+    jobActionLog.textContent = latest
+      ? 'Default JSON loaded from latest saved schedule item: ' + (latest.title || latest.itemId) + ' · ' + (latest.updatedAt || '')
+      : 'Default JSON loaded from action catalog.';
+  }
 }
 async function runSelectedJobActionNow() {
   if (!jobAction || !jobActionPayload || !jobActionRunBtn) return;
@@ -2911,7 +3298,7 @@ async function deleteScheduleItem() {
 scheduleForm?.addEventListener('submit', saveScheduleItem);
 schedulePayload?.addEventListener('input', markSchedulePayloadCustom);
 schedulePayloadThumbnail?.addEventListener('change', () => applySchedulePayloadBoolean('thumbnail', schedulePayloadThumbnail.checked));
-schedulePayloadUploadYoutube?.addEventListener('change', () => applySchedulePayloadBoolean('uploadYoutube', schedulePayloadUploadYoutube.checked));
+schedulePayloadYoutubeUploadMode?.addEventListener('change', () => applyScheduleYoutubeUploadMode(schedulePayloadYoutubeUploadMode.value));
 scheduleNewBtn?.addEventListener('click', () => resetScheduleForm());
 scheduleDeleteBtn?.addEventListener('click', deleteScheduleItem);
 scheduleWorkerCheckBtn?.addEventListener('click', dryRunScheduleWorkerCheck);
@@ -3314,7 +3701,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/render') {
     try {
       const body = await readRequestJson(req);
-      const running = Array.from(jobs.values()).find((job) => job.status === 'running' || job.status === 'stopping');
+      const running = findRunningRenderJob();
       if (running) return jsonResponse(res, 409, { ok: false, error: `job ${running.id} is already running` });
       const options = normalizeOptions({
         ...body,
