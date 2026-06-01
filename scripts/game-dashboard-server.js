@@ -264,7 +264,7 @@ const SCHEDULE_ACTIONS = [
         videoCapture: 'canvas',
         videoCanvasLayout: 'horizontal',
         thumbnail: true,
-        uploadYoutube: true,
+        uploadYoutube: false,
         youtubePrivacy: 'public',
         qualityPreset: '1080p-smooth',
         qualityLabel: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast',
@@ -275,6 +275,8 @@ const SCHEDULE_ACTIONS = [
         captureScale: 1,
         videoPreset: 'veryfast',
         headful: true,
+        debugLogs: true,
+        canvasTransport: 'base64',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -289,7 +291,6 @@ const SCHEDULE_ACTIONS = [
       kind: 'youtube-upload',
       titleHint: 'Marble Short Video',
       dynamicAttributes: {
-        trackLength: { strategy: 'randomInt', min: 300, max: 500, step: 10 },
         obstacleTypes: { strategy: 'randomSample', count: 4, source: 'availableObstacleTypes' },
       },
       renderOptions: {
@@ -298,7 +299,6 @@ const SCHEDULE_ACTIONS = [
         lengthMode: 'target-duration',
         targetMinutes: 3,
         targetSeconds: 180,
-        trackLength: { dynamic: 'randomInt', min: 300, max: 500, step: 10 },
         density: 'many',
         obstacleDistribution: 'random',
         obstacleTypes: { dynamic: 'randomSample', count: 4, source: 'availableObstacleTypes' },
@@ -307,7 +307,7 @@ const SCHEDULE_ACTIONS = [
         videoCapture: 'canvas',
         videoCanvasLayout: 'vertical',
         thumbnail: true,
-        uploadYoutube: true,
+        uploadYoutube: false,
         youtubePrivacy: 'public',
         qualityPreset: '1080p-smooth',
         qualityLabel: '1080p Smooth · 1080×1920 · 60fps · CRF18 · veryfast',
@@ -318,6 +318,8 @@ const SCHEDULE_ACTIONS = [
         captureScale: 1,
         videoPreset: 'veryfast',
         headful: true,
+        debugLogs: true,
+        canvasTransport: 'base64',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -357,6 +359,9 @@ const SCHEDULE_ACTIONS = [
         captureScale: 1,
         videoPreset: 'veryfast',
         renderPerformanceProfile: 'turbo60',
+        headful: true,
+        debugLogs: true,
+        canvasTransport: 'base64',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -732,7 +737,7 @@ function calculateTrackLengthForDuration({ targetSeconds, recordMode, multipleRa
   const raceCount = estimateRaceCount(recordMode, multipleRaceCount);
   const nonRaceSeconds = estimateNonRaceSeconds(recordMode, raceCount);
   const raceSeconds = Math.max(35, (targetSeconds - nonRaceSeconds) / raceCount);
-  const metersPerSecond = recordMode === 'continuous' && raceCount === 1 ? 1.45 : 4.6;
+  const metersPerSecond = 4.6;
   return Math.max(80, Math.min(3000, Math.round((raceSeconds * metersPerSecond) / 10) * 10));
 }
 
@@ -806,6 +811,13 @@ function normalizeOptions(input = {}) {
     .slice(0, 80);
   const ttsVoice = String(input.ttsVoice || 'Alex').replace(/[^\w .'-]/g, '').trim().slice(0, 48) || 'Alex';
   const dryRun = input.dryRun === true || input.__dryRun === true;
+  const debugLogs = input.debugLogs === true || input.enableRenderDebugLogs === true;
+  const rawCanvasTransport = String(input.canvasTransport || '').trim().toLowerCase();
+  const canvasTransport = ['array', 'chunk-array', 'legacy-array', 'array-binding'].includes(rawCanvasTransport)
+    ? 'array'
+    : ['buffered', 'browser-buffered-final-export', 'auto-buffered'].includes(rawCanvasTransport)
+      ? rawCanvasTransport
+      : 'base64';
   const obstacleDistribution = OBSTACLE_DISTRIBUTION_MODES.some((mode) => mode.value === input.obstacleDistribution) ? input.obstacleDistribution : 'random';
   return {
     recordMode,
@@ -852,6 +864,9 @@ function normalizeOptions(input = {}) {
     youtubePrivacy,
     thumbnailTitle,
     ttsVoice,
+    debugLogs,
+    enableRenderDebugLogs: debugLogs,
+    canvasTransport,
     dryRun,
     dashboardSource: input.dashboardSource && typeof input.dashboardSource === 'object' && !Array.isArray(input.dashboardSource) ? { ...input.dashboardSource } : null,
     scheduleSource: input.scheduleSource && typeof input.scheduleSource === 'object' && !Array.isArray(input.scheduleSource) ? { ...input.scheduleSource } : null,
@@ -1283,6 +1298,8 @@ function startRender(options) {
   ];
   if (options.thumbnailTitle) renderExtraArgs.push(`--thumbnail-title=${options.thumbnailTitle}`);
   if (options.obstacleTypes.length) renderExtraArgs.push(`--obstacle-types=${options.obstacleTypes.join(',')}`);
+  if (options.enableRenderDebugLogs || options.debugLogs) renderExtraArgs.push('--debug-logs=true');
+  if (options.canvasTransport) renderExtraArgs.push(`--canvas-transport=${options.canvasTransport}`);
   if (!options.audio) renderExtraArgs.push('--audio=false');
   if (options.headful) renderExtraArgs.push('--headful=true');
   if (options.browserWindowPosition) renderExtraArgs.push(`--browser-window-position=${options.browserWindowPosition}`);
