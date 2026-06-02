@@ -235,6 +235,8 @@ const DENSITY_PRESETS = [
   { value: 'extreme', label: 'Extreme / 高密度' },
 ];
 
+const MARBLE_VISUAL_THEME_KEYS = ['mixed', 'neon', 'luxe', 'candy', 'natural'];
+
 const SCHEDULE_ACTIONS = [
   {
     value: 'youtube-marble-long-video',
@@ -257,6 +259,7 @@ const SCHEDULE_ACTIONS = [
         trackLength: 350,
         stageTrackLabel: 'Unified 350m',
         density: 'many',
+        visualTheme: { dynamic: 'randomChoice', values: MARBLE_VISUAL_THEME_KEYS },
         obstacleDistribution: 'random',
         obstacleTypes: { dynamic: 'randomSample', count: 4, source: 'availableObstacleTypes' },
         format: 'mp4',
@@ -300,6 +303,7 @@ const SCHEDULE_ACTIONS = [
         targetMinutes: 3,
         targetSeconds: 180,
         density: 'many',
+        visualTheme: { dynamic: 'randomChoice', values: MARBLE_VISUAL_THEME_KEYS },
         obstacleDistribution: 'random',
         obstacleTypes: { dynamic: 'randomSample', count: 4, source: 'availableObstacleTypes' },
         format: 'mp4',
@@ -746,6 +750,9 @@ function normalizeOptions(input = {}) {
   const recordMode = BACKGROUND_RECORD_MODES.some((mode) => mode.value === input.recordMode) ? input.recordMode : 'continuous';
   const multipleRaceCount = Math.max(1, Math.min(99, Math.round(Number(input.multipleRaceCount) || 5)));
   const density = DENSITY_PRESETS.some((item) => item.value === input.density) ? input.density : 'many';
+  const visualTheme = MARBLE_VISUAL_THEME_KEYS.includes(String(input.visualTheme || '').trim())
+    ? String(input.visualTheme).trim()
+    : '';
   const requestedTypes = Array.isArray(input.obstacleTypes) ? input.obstacleTypes : [];
   const allowedTypes = new Set(OBSTACLE_TYPES.map((item) => item.value));
   const obstacleTypes = requestedTypes.filter((type) => allowedTypes.has(type));
@@ -826,6 +833,7 @@ function normalizeOptions(input = {}) {
     obstacleDistribution,
     cupName,
     density,
+    visualTheme,
     obstacleTypes,
     format,
     videoCapture,
@@ -1298,6 +1306,7 @@ function startRender(options) {
   ];
   if (options.thumbnailTitle) renderExtraArgs.push(`--thumbnail-title=${options.thumbnailTitle}`);
   if (options.obstacleTypes.length) renderExtraArgs.push(`--obstacle-types=${options.obstacleTypes.join(',')}`);
+  if (options.visualTheme) renderExtraArgs.push(`--visual-theme=${options.visualTheme}`);
   if (options.enableRenderDebugLogs || options.debugLogs) renderExtraArgs.push('--debug-logs=true');
   if (options.canvasTransport) renderExtraArgs.push(`--canvas-transport=${options.canvasTransport}`);
   if (!options.audio) renderExtraArgs.push('--audio=false');
@@ -1512,12 +1521,19 @@ function randomSampleFromSpec(spec = {}) {
   return pool.slice(0, count);
 }
 
+function randomChoiceFromSpec(spec = {}) {
+  const pool = [...new Set(Array.isArray(spec.values) ? spec.values : [])].filter(Boolean);
+  if (!pool.length) return '';
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 function resolveScheduleDynamicValue(value) {
   if (Array.isArray(value)) return value.map(resolveScheduleDynamicValue);
   if (!value || typeof value !== 'object') return value;
   const strategy = value.strategy || value.dynamic;
   if (strategy === 'randomInt') return randomIntFromSpec(value);
   if (strategy === 'randomSample') return randomSampleFromSpec(value);
+  if (strategy === 'randomChoice') return randomChoiceFromSpec(value);
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, resolveScheduleDynamicValue(entry)]));
 }
 
