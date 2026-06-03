@@ -226,6 +226,7 @@ const OBSTACLE_DISTRIBUTION_MODES = [
 const BACKGROUND_RECORD_MODES = [
   { value: 'single', key: 'single', label: 'Single Race', description: 'Background record one race only.' },
   { value: 'continuous', key: 'multiple', label: 'Multiple', description: 'Background record several single races; regenerate track between races.' },
+  { value: 'survivor', key: 'survivor', label: 'Survivor League', description: 'Background hidden-score survivor league; keep top performers and replace the rest.' },
   { value: 'cup', key: 'cup', label: 'Cup Mode', description: 'Background tournament render using QF / SF / Final timing.' },
 ];
 
@@ -699,13 +700,14 @@ function clampNumber(value, min, max, fallback) {
 }
 
 function estimateRaceCount(recordMode, multipleRaceCount) {
-  if (recordMode === 'continuous') return Math.max(1, multipleRaceCount || 5);
+  if (recordMode === 'continuous' || recordMode === 'survivor') return Math.max(1, multipleRaceCount || 5);
   if (recordMode === 'cup') return 3;
   return 1;
 }
 
 function estimateNonRaceSeconds(recordMode, raceCount) {
   if (recordMode === 'cup') return 164;
+  if (recordMode === 'survivor') return 2 + Math.max(0, raceCount - 1) * 15 + FINAL_RACE_NODE_GATE_SECONDS;
   if (recordMode === 'continuous') return 2 + Math.max(0, raceCount - 1) * 10 + FINAL_RACE_NODE_GATE_SECONDS;
   return 7;
 }
@@ -2859,6 +2861,7 @@ let shouldAutoScrollScheduleToNow = false;
 const recordModeHints = {
   single: 'Single: in-game recording only; use Marble Rush page for manual Single capture.',
   continuous: 'Multiple: background record repeated single races; 場數由 Multiple 場數控制。',
+  survivor: 'Survivor League: hidden-score league using Multiple 場數 as race count; top performers survive each cycle.',
   cup: 'Cup Mode: all stages use the same per-race track length.',
 };
 let currentJobId = null;
@@ -2883,16 +2886,17 @@ function normalizeCupSize() {
 function updateRecordModeHint() {
   const mode = selectedRecordMode();
   if (recordModeHint) recordModeHint.textContent = recordModeHints[mode] || recordModeHints.cup;
-  if (multipleRaceCountInput) multipleRaceCountInput.disabled = mode !== 'continuous';
+  if (multipleRaceCountInput) multipleRaceCountInput.disabled = !(mode === 'continuous' || mode === 'survivor');
 }
 
 function estimateDashboardTrackLength() {
   const mode = selectedRecordMode();
-  const races = mode === 'continuous' ? normalizeMultipleRaceCount() : mode === 'cup' ? 3 : 1;
+  const races = mode === 'continuous' || mode === 'survivor' ? normalizeMultipleRaceCount() : mode === 'cup' ? 3 : 1;
   const targetSeconds = Math.max(60, Number(targetMinutesInput?.value || 10) * 60);
-  const nonRaceSeconds = mode === 'cup' ? 164 : mode === 'continuous' ? 2 + Math.max(0, races - 1) * 10 + 5 : 7;
+  const nonRaceSeconds = mode === 'cup' ? 164 : mode === 'survivor' ? 2 + Math.max(0, races - 1) * 15 + 5 : mode === 'continuous' ? 2 + Math.max(0, races - 1) * 10 + 5 : 7;
   const raceSeconds = Math.max(35, (targetSeconds - nonRaceSeconds) / races);
-  return Math.max(80, Math.min(3000, Math.round((raceSeconds * 4.6) / 10) * 10));
+  const metersPerSecond = 4.6;
+  return Math.max(80, Math.min(3000, Math.round((raceSeconds * metersPerSecond) / 10) * 10));
 }
 function estimateDashboardMaxRaceSeconds(trackLength) {
   return Math.max(45, Math.min(1200, Math.ceil(trackLength * 0.3)));
@@ -2982,7 +2986,7 @@ function selectedSchedulePayloadOptions() {
 }
 function normalizeSchedulePayloadRecordMode(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  return ['single', 'continuous', 'cup'].includes(normalized) ? normalized : 'continuous';
+  return ['single', 'continuous', 'survivor', 'cup'].includes(normalized) ? normalized : 'continuous';
 }
 function updateScheduleSavePreview() {
   if (!scheduleLog || !schedulePayload) return;
@@ -3538,8 +3542,8 @@ function renderJob(job) {
     (job.youtubeUploadExists ? ' · <a href="' + job.youtubeUploadUrl + '" target="_blank">Upload JSON</a>' : '') +
     (job.youtubeUploadInfo?.url ? ' · <a href="' + job.youtubeUploadInfo.url + '" target="_blank">YouTube video</a>' : '');
   jobPills.innerHTML = [
-    'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : job.options.recordMode === 'single' ? 'Single Race' : 'Cup Mode'),
-    job.options.recordMode === 'continuous' ? 'Races: ' + (job.options.multipleRaceCount || 5) : null,
+    'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : job.options.recordMode === 'survivor' ? 'Survivor League' : job.options.recordMode === 'single' ? 'Single Race' : 'Cup Mode'),
+    job.options.recordMode === 'continuous' || job.options.recordMode === 'survivor' ? 'Races: ' + (job.options.multipleRaceCount || 5) : null,
     job.options.cupName ? 'Cup note: ' + job.options.cupName : null,
     'Length mode: ' + (job.options.lengthMode === 'fixed-track' ? 'Fixed track' : 'Target duration'),
     'Target: ' + (job.options.targetMinutes || 10) + ' min',
