@@ -3051,15 +3051,22 @@ function markSchedulePayloadCustom() {
   syncScheduleQuickFieldsFromPayload();
   updateScheduleSavePreview();
 }
+function jobActionDefaultPayload(action) {
+  const payload = scheduleActionDefaultPayload(action);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  if (!payload.renderOptions || typeof payload.renderOptions !== 'object' || Array.isArray(payload.renderOptions)) payload.renderOptions = {};
+  payload.renderOptions.uploadYoutube = false;
+  return payload;
+}
 function setJobActionPayloadFromPreset() {
   if (!jobAction || !jobActionPayload) return;
-  jobActionPayload.value = JSON.stringify(scheduleActionDefaultPayload(jobAction.value), null, 2);
+  jobActionPayload.value = JSON.stringify(jobActionDefaultPayload(jobAction.value), null, 2);
   syncJobActionQuickFieldsFromPayload();
   const latest = scheduleActionLatestPayloadMeta(jobAction.value);
   if (jobActionLog) {
     jobActionLog.textContent = latest
-      ? 'Default JSON loaded from latest saved schedule item: ' + (latest.title || latest.itemId) + ' · ' + (latest.updatedAt || '')
-      : 'Default JSON loaded from action catalog.';
+      ? 'Default JSON loaded from latest saved schedule item with YouTube upload off: ' + (latest.title || latest.itemId) + ' · ' + (latest.updatedAt || '')
+      : 'Default JSON loaded from action catalog with YouTube upload off.';
   }
 }
 function readJobActionPayloadJson() {
