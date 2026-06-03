@@ -1555,6 +1555,40 @@ function appendScheduleRun(entry) {
   return saveScheduleRunState(state);
 }
 
+function publicScheduleRunSummary(run = {}) {
+  if (!run || typeof run !== 'object') return null;
+  const slot = run.slot && typeof run.slot === 'object'
+    ? {
+      slotKey: run.slot.slotKey || null,
+      weekday: run.slot.weekday,
+      hour: run.slot.hour,
+      minute: run.slot.minute,
+    }
+    : null;
+  return {
+    id: run.id || null,
+    itemId: run.itemId || null,
+    title: run.title || null,
+    status: run.status || null,
+    checkedAt: run.checkedAt || null,
+    startedAt: run.startedAt || null,
+    finishedAt: run.finishedAt || null,
+    jobId: run.jobId || null,
+    reason: run.reason || null,
+    error: run.error ? String(run.error).slice(0, 500) : null,
+    outputName: run.outputName || null,
+    outputFolder: run.outputFolder || null,
+    thumbnailName: run.thumbnailName || null,
+    thumbnailExists: run.thumbnailExists,
+    youtubeMetadataName: run.youtubeMetadataName || null,
+    youtubeMetadataExists: run.youtubeMetadataExists,
+    youtubeUploadName: run.youtubeUploadName || null,
+    youtubeUploadExists: run.youtubeUploadExists,
+    runKey: run.runKey || null,
+    slot,
+  };
+}
+
 function latestScheduleRunsByItem(runs = []) {
   const latest = {};
   for (const run of runs) {
@@ -1562,7 +1596,7 @@ function latestScheduleRunsByItem(runs = []) {
     const current = latest[run.itemId];
     const runTime = Date.parse(run.finishedAt || run.checkedAt || 0);
     const currentTime = Date.parse(current?.finishedAt || current?.checkedAt || 0);
-    if (!current || runTime >= currentTime) latest[run.itemId] = run;
+    if (!current || runTime >= currentTime) latest[run.itemId] = publicScheduleRunSummary(run);
   }
   return latest;
 }
@@ -1584,7 +1618,7 @@ function latestScheduleRunsByItemTime(runs = []) {
     const current = latest[key];
     const runTime = Date.parse(run.finishedAt || run.checkedAt || 0);
     const currentTime = Date.parse(current?.finishedAt || current?.checkedAt || 0);
-    if (!current || runTime >= currentTime) latest[key] = run;
+    if (!current || runTime >= currentTime) latest[key] = publicScheduleRunSummary(run);
   }
   return latest;
 }
@@ -1924,7 +1958,7 @@ function publicScheduleWorkerStatus() {
     nextCheckAt: scheduleWorker.nextCheckAt,
     lastResult: scheduleWorker.lastResult,
     runStatePath: scheduleRunStatePath,
-    recentRuns: (state.runs || []).slice(-20).reverse(),
+    recentRuns: (state.runs || []).slice(-20).reverse().map(publicScheduleRunSummary).filter(Boolean),
     latestRunByItem: latestScheduleRunsByItem(state.runs || []),
     latestRunByItemTime: latestScheduleRunsByItemTime(state.runs || []),
   };
@@ -3229,7 +3263,7 @@ function scrollScheduleToCurrentHour() {
 function setActiveTab(tabId) {
   document.querySelectorAll('.tab-panel').forEach((panel) => { panel.hidden = panel.id !== tabId; });
   document.querySelectorAll('.tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tabTarget === tabId));
-  if (tabId === 'scheduleTab') { setScheduleToToday({ scroll: true }); refreshSchedule(); refreshScheduleWorker(); }
+  if (tabId === 'scheduleTab') { setScheduleToToday({ scroll: true }); refreshSchedule(); }
 }
 document.querySelectorAll('.tab-btn').forEach((btn) => btn.addEventListener('click', () => setActiveTab(btn.dataset.tabTarget)));
 function renderScheduleWeekTabs() {
@@ -3310,19 +3344,20 @@ function renderSchedule() {
 function scheduleItemsForDay(weekday) { return (dashboardSchedule.items || []).filter((item) => scheduleRunsOnDay(item, weekday)); }
 async function refreshSchedule() {
   if (!scheduleGrid) return;
-  const res = await fetch('/api/schedule');
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error || 'schedule load failed');
-  dashboardSchedule = data.schedule || { items: [] };
+  const [scheduleResponse, workerData] = await Promise.all([
+    fetch('/api/schedule').then((res) => res.json()),
+    fetch('/api/schedule/worker').then((res) => res.json()).catch(() => null),
+  ]);
+  if (!scheduleResponse.ok) throw new Error(scheduleResponse.error || 'schedule load failed');
+  dashboardSchedule = scheduleResponse.schedule || { items: [] };
   if (!document.querySelector('#scheduleTab')?.hidden) setScheduleToToday({ scroll: shouldAutoScrollScheduleToNow });
-  const workerData = await fetch('/api/schedule/worker').then((res) => res.json()).catch(() => null);
   if (workerData?.ok) {
     dashboardSchedule.latestRunByItem = workerData.worker.latestRunByItem || {};
     dashboardSchedule.latestRunByItemTime = workerData.worker.latestRunByItemTime || {};
+    renderScheduleWorker(workerData.worker, { skipScheduleRender: true });
   }
   renderSchedule();
-  if (scheduleLog) scheduleLog.textContent = 'Loaded from ' + (data.path || 'schedule store');
-  await refreshScheduleWorker({ preserveAutoScroll: true });
+  if (scheduleLog) scheduleLog.textContent = 'Loaded from ' + (scheduleResponse.path || 'schedule store');
 }
 function formatScheduleRun(run) {
   if (!run) return '';
@@ -3337,7 +3372,7 @@ function renderScheduleRunLog(runs = []) {
     return '<div class="schedule-log-entry ' + statusClass + '"><b><span class="run-dot ' + statusClass + '"></span> ' + escapeHtml(scheduleRunStatusLabel(run)) + ' · ' + escapeHtml(run.title || run.itemId || 'item') + '</b><span>' + escapeHtml((run.slot?.slotKey || '') + (run.jobId ? ' · job #' + run.jobId : '') + (run.reason ? ' · ' + run.reason : '') + (run.error ? ' · ' + run.error : '') + (run.outputName ? ' · ' + run.outputName : '')) + '</span></div>';
   }).join('') + '</div>';
 }
-function renderScheduleWorker(worker) {
+function renderScheduleWorker(worker, { skipScheduleRender = false } = {}) {
   if (!worker) return;
   if (scheduleWorkerStatus) scheduleWorkerStatus.textContent = (worker.running ? 'Running' : 'Stopped') + ' · every ' + (worker.intervalMinutes || 5) + ' min';
   if (scheduleWorkerMeta) {
@@ -3349,7 +3384,7 @@ function renderScheduleWorker(worker) {
       'Due last check: ' + (worker.lastResult?.dueCount ?? 0),
       'Log file: ' + (worker.runStatePath || ''),
     ].join(' · ') + renderScheduleRunLog(worker.recentRuns || []);
-    renderSchedule();
+    if (!skipScheduleRender) renderSchedule();
   }
 }
 async function refreshScheduleWorker({ preserveAutoScroll = false } = {}) {
