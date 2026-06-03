@@ -2771,6 +2771,12 @@ function dashboardHtml() {
           <p class="sub">揀一個 schedule action，下面 JSON 會自動填 default payload；你可以即場改 JSON，再按 Run now 直接開一個 dashboard-trigger job。</p>
           <div class="form-grid">
             <div class="wide"><label for="jobAction">Action</label><select id="jobAction">${SCHEDULE_ACTIONS.map((action) => `<option value="${action.value}">${action.label}</option>`).join('')}</select></div>
+            <div>
+              <label for="jobActionRecordMode">Render mode</label>
+              <select id="jobActionRecordMode">
+                ${BACKGROUND_RECORD_MODES.map((mode) => `<option value="${mode.value}">${mode.label}</option>`).join('')}
+              </select>
+            </div>
             <div class="wide"><label>&nbsp;</label><div class="actions"><button id="jobActionRunBtn" type="button">Run now</button><button id="jobActionResetBtn" class="secondary" type="button">Reset JSON</button></div></div>
           </div>
           <label for="jobActionPayload">Payload JSON</label>
@@ -2842,6 +2848,7 @@ const scheduleWorkerStatus = document.querySelector('#scheduleWorkerStatus');
 const scheduleWorkerMeta = document.querySelector('#scheduleWorkerMeta');
 const scheduleWorkerCheckBtn = document.querySelector('#scheduleWorkerCheckBtn');
 const jobAction = document.querySelector('#jobAction');
+const jobActionRecordMode = document.querySelector('#jobActionRecordMode');
 const jobActionPayload = document.querySelector('#jobActionPayload');
 const jobActionRunBtn = document.querySelector('#jobActionRunBtn');
 const jobActionResetBtn = document.querySelector('#jobActionResetBtn');
@@ -3047,12 +3054,65 @@ function markSchedulePayloadCustom() {
 function setJobActionPayloadFromPreset() {
   if (!jobAction || !jobActionPayload) return;
   jobActionPayload.value = JSON.stringify(scheduleActionDefaultPayload(jobAction.value), null, 2);
+  syncJobActionQuickFieldsFromPayload();
   const latest = scheduleActionLatestPayloadMeta(jobAction.value);
   if (jobActionLog) {
     jobActionLog.textContent = latest
       ? 'Default JSON loaded from latest saved schedule item: ' + (latest.title || latest.itemId) + ' · ' + (latest.updatedAt || '')
       : 'Default JSON loaded from action catalog.';
   }
+}
+function readJobActionPayloadJson() {
+  if (!jobActionPayload?.value?.trim()) return {};
+  return JSON.parse(jobActionPayload.value);
+}
+function selectedJobActionPayloadOptions() {
+  try {
+    const payload = readJobActionPayloadJson();
+    return payload && typeof payload === 'object' && !Array.isArray(payload) && payload.renderOptions && typeof payload.renderOptions === 'object' && !Array.isArray(payload.renderOptions)
+      ? payload.renderOptions
+      : {};
+  } catch {
+    return {};
+  }
+}
+function syncJobActionQuickFieldsFromPayload() {
+  const options = selectedJobActionPayloadOptions();
+  if (jobActionRecordMode) jobActionRecordMode.value = normalizeSchedulePayloadRecordMode(options.recordMode);
+}
+function updateJobActionLogPreview() {
+  if (!jobActionLog || !jobActionPayload) return;
+  if (!jobActionPayload.value.trim()) {
+    jobActionLog.textContent = 'Payload JSON empty · action default will be used when Run now is clicked';
+    return;
+  }
+  try {
+    const payload = readJobActionPayloadJson();
+    const options = payload?.renderOptions || {};
+    const mode = normalizeSchedulePayloadRecordMode(options.recordMode);
+    jobActionLog.textContent = 'Editing JSON · mode=' + mode + ' · thumbnail=' + String(options.thumbnail) + ' · uploadYoutube=' + String(options.uploadYoutube) + ' · privacy=' + String(options.youtubePrivacy || '(default)');
+  } catch (error) {
+    jobActionLog.textContent = 'Payload JSON error: ' + error.message;
+  }
+}
+function applyJobActionPayloadRenderOption(key, value) {
+  if (!jobActionPayload) return;
+  let payload;
+  try {
+    payload = readJobActionPayloadJson();
+  } catch (error) {
+    if (jobActionLog) jobActionLog.textContent = 'Payload JSON error: ' + error.message;
+    return;
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {};
+  if (!payload.renderOptions || typeof payload.renderOptions !== 'object' || Array.isArray(payload.renderOptions)) payload.renderOptions = {};
+  payload.renderOptions[key] = value;
+  jobActionPayload.value = JSON.stringify(payload, null, 2);
+  updateJobActionLogPreview();
+}
+function markJobActionPayloadCustom() {
+  syncJobActionQuickFieldsFromPayload();
+  updateJobActionLogPreview();
 }
 async function runSelectedJobActionNow() {
   if (!jobAction || !jobActionPayload || !jobActionRunBtn) return;
@@ -3606,6 +3666,8 @@ async function refreshJobs() {
 jobsRefreshBtn.onclick = refreshJobs;
 jobAction?.addEventListener('change', setJobActionPayloadFromPreset);
 jobActionResetBtn?.addEventListener('click', setJobActionPayloadFromPreset);
+jobActionPayload?.addEventListener('input', markJobActionPayloadCustom);
+jobActionRecordMode?.addEventListener('change', () => applyJobActionPayloadRenderOption('recordMode', normalizeSchedulePayloadRecordMode(jobActionRecordMode.value)));
 jobActionRunBtn?.addEventListener('click', runSelectedJobActionNow);
 setJobActionPayloadFromPreset();
 refreshJobs();
