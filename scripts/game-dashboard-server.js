@@ -281,7 +281,7 @@ const SCHEDULE_ACTIONS = [
         videoPreset: 'veryfast',
         headful: true,
         debugLogs: true,
-        canvasTransport: 'base64',
+        canvasTransport: 'chunk',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -325,7 +325,7 @@ const SCHEDULE_ACTIONS = [
         videoPreset: 'veryfast',
         headful: true,
         debugLogs: true,
-        canvasTransport: 'base64',
+        canvasTransport: 'chunk',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -367,7 +367,7 @@ const SCHEDULE_ACTIONS = [
         renderPerformanceProfile: 'turbo60',
         headful: true,
         debugLogs: true,
-        canvasTransport: 'base64',
+        canvasTransport: 'chunk',
         ttsVoice: 'Alex',
         renderPort: 4300,
       },
@@ -827,7 +827,9 @@ function normalizeOptions(input = {}) {
     ? 'array'
     : ['buffered', 'browser-buffered-final-export', 'auto-buffered'].includes(rawCanvasTransport)
       ? rawCanvasTransport
-      : 'base64';
+      : ['chunk', 'base64', 'chunk-base64', 'base64-binding'].includes(rawCanvasTransport)
+        ? rawCanvasTransport
+        : 'chunk';
   const obstacleDistribution = OBSTACLE_DISTRIBUTION_MODES.some((mode) => mode.value === input.obstacleDistribution) ? input.obstacleDistribution : 'random';
   return {
     recordMode,
