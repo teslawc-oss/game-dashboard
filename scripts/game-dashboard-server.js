@@ -224,6 +224,7 @@ const OBSTACLE_DISTRIBUTION_MODES = [
 ];
 
 const BACKGROUND_RECORD_MODES = [
+  { value: 'single', key: 'single', label: 'Single Race', description: 'Background record one race only.' },
   { value: 'continuous', key: 'multiple', label: 'Multiple', description: 'Background record several single races; regenerate track between races.' },
   { value: 'cup', key: 'cup', label: 'Cup Mode', description: 'Background tournament render using QF / SF / Final timing.' },
 ];
@@ -2739,6 +2740,12 @@ function dashboardHtml() {
           <div class="form-grid">
             <label class="check"><input id="schedulePayloadThumbnail" type="checkbox" checked> <span>Generate thumbnail（寫入 Payload JSON）</span></label>
             <div>
+              <label for="schedulePayloadRecordMode">Render mode</label>
+              <select id="schedulePayloadRecordMode">
+                ${BACKGROUND_RECORD_MODES.map((mode) => `<option value="${mode.value}">${mode.label}</option>`).join('')}
+              </select>
+            </div>
+            <div>
               <label for="schedulePayloadYoutubeUploadMode">YouTube upload</label>
               <select id="schedulePayloadYoutubeUploadMode">
                 <option value="off">No upload（安全）</option>
@@ -2825,6 +2832,7 @@ const scheduleAction = document.querySelector('#scheduleAction');
 const scheduleEnabled = document.querySelector('#scheduleEnabled');
 const schedulePayload = document.querySelector('#schedulePayload');
 const schedulePayloadThumbnail = document.querySelector('#schedulePayloadThumbnail');
+const schedulePayloadRecordMode = document.querySelector('#schedulePayloadRecordMode');
 const schedulePayloadYoutubeUploadMode = document.querySelector('#schedulePayloadYoutubeUploadMode');
 const scheduleNotes = document.querySelector('#scheduleNotes');
 const scheduleNewBtn = document.querySelector('#scheduleNewBtn');
@@ -2965,6 +2973,10 @@ function selectedSchedulePayloadOptions() {
     return {};
   }
 }
+function normalizeSchedulePayloadRecordMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['single', 'continuous', 'cup'].includes(normalized) ? normalized : 'continuous';
+}
 function updateScheduleSavePreview() {
   if (!scheduleLog || !schedulePayload) return;
   if (!schedulePayload.value.trim()) {
@@ -2974,7 +2986,8 @@ function updateScheduleSavePreview() {
   try {
     const payload = readSchedulePayloadJson();
     const options = payload?.renderOptions || {};
-    scheduleLog.textContent = 'Editing JSON · thumbnail=' + String(options.thumbnail) + ' · uploadYoutube=' + String(options.uploadYoutube) + ' · privacy=' + String(options.youtubePrivacy || '(default)');
+    const mode = normalizeSchedulePayloadRecordMode(options.recordMode);
+    scheduleLog.textContent = 'Editing JSON · mode=' + mode + ' · thumbnail=' + String(options.thumbnail) + ' · uploadYoutube=' + String(options.uploadYoutube) + ' · privacy=' + String(options.youtubePrivacy || '(default)');
   } catch (error) {
     scheduleLog.textContent = 'Payload JSON error: ' + error.message;
   }
@@ -3023,6 +3036,7 @@ function scheduleYoutubeUploadModeFromOptions(options = {}) {
 function syncScheduleQuickFieldsFromPayload() {
   const options = selectedSchedulePayloadOptions();
   if (schedulePayloadThumbnail) schedulePayloadThumbnail.checked = options.thumbnail !== false;
+  if (schedulePayloadRecordMode) schedulePayloadRecordMode.value = normalizeSchedulePayloadRecordMode(options.recordMode);
   if (schedulePayloadYoutubeUploadMode) schedulePayloadYoutubeUploadMode.value = scheduleYoutubeUploadModeFromOptions(options);
 }
 function markSchedulePayloadCustom() {
@@ -3331,6 +3345,7 @@ async function deleteScheduleItem() {
 scheduleForm?.addEventListener('submit', saveScheduleItem);
 schedulePayload?.addEventListener('input', markSchedulePayloadCustom);
 schedulePayloadThumbnail?.addEventListener('change', () => applySchedulePayloadBoolean('thumbnail', schedulePayloadThumbnail.checked));
+schedulePayloadRecordMode?.addEventListener('change', () => applySchedulePayloadRenderOption('recordMode', normalizeSchedulePayloadRecordMode(schedulePayloadRecordMode.value)));
 schedulePayloadYoutubeUploadMode?.addEventListener('change', () => applyScheduleYoutubeUploadMode(schedulePayloadYoutubeUploadMode.value));
 scheduleNewBtn?.addEventListener('click', () => resetScheduleForm());
 scheduleDeleteBtn?.addEventListener('click', deleteScheduleItem);
@@ -3456,7 +3471,7 @@ function renderJob(job) {
     (job.youtubeUploadExists ? ' · <a href="' + job.youtubeUploadUrl + '" target="_blank">Upload JSON</a>' : '') +
     (job.youtubeUploadInfo?.url ? ' · <a href="' + job.youtubeUploadInfo.url + '" target="_blank">YouTube video</a>' : '');
   jobPills.innerHTML = [
-    'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : 'Cup Mode'),
+    'Mode: ' + (job.options.recordMode === 'continuous' ? 'Multiple' : job.options.recordMode === 'single' ? 'Single Race' : 'Cup Mode'),
     job.options.recordMode === 'continuous' ? 'Races: ' + (job.options.multipleRaceCount || 5) : null,
     job.options.cupName ? 'Cup note: ' + job.options.cupName : null,
     'Length mode: ' + (job.options.lengthMode === 'fixed-track' ? 'Fixed track' : 'Target duration'),
