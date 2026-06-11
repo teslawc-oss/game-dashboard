@@ -19,6 +19,7 @@
     { "value": "gongBumper", "label": "Gong Bumper", "category": "normal", "tags": ["bumper", "event"] },
     { "value": "slingshot", "label": "Slingshot", "category": "normal", "tags": [] },
     { "value": "spinnerGate", "label": "Spinner Gate", "category": "normal", "tags": [] },
+    { "value": "movingGate", "label": "Moving Gate", "category": "normal", "tags": ["gate", "timing"] },
     { "value": "dropTarget", "label": "Drop Target", "category": "buff", "tags": ["target", "buff"] }
   ]
 }
