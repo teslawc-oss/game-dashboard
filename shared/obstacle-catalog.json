@@ -20,6 +20,7 @@
     { "value": "slingshot", "label": "Slingshot", "category": "normal", "tags": [] },
     { "value": "spinnerGate", "label": "Spinner Gate", "category": "normal", "tags": [] },
     { "value": "movingGate", "label": "Moving Gate", "category": "normal", "tags": ["gate", "timing"] },
+    { "value": "tiltBridge", "label": "Tilt Bridge", "category": "normal", "tags": ["bridge", "timing", "motion"] },
     { "value": "dropTarget", "label": "Drop Target", "category": "buff", "tags": ["target", "buff"] }
   ]
 }
