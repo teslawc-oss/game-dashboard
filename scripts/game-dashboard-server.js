@@ -239,7 +239,19 @@ const DENSITY_PRESETS = [
 
 const MARBLE_VISUAL_THEME_KEYS = ['mixed', 'neon', 'luxe', 'candy', 'natural'];
 
+const DEFAULT_RECORDINGS_RETENTION_DAYS = 7;
+
 const SCHEDULE_ACTIONS = [
+  {
+    value: 'recordings-housekeeping',
+    label: 'Housekeeping - Delete Old Recordings',
+    description: 'Delete recording bundles and related files older than the retention window.',
+    payload: {
+      game: 'marble-rush',
+      kind: 'recordings-housekeeping',
+      retentionDays: DEFAULT_RECORDINGS_RETENTION_DAYS,
+    },
+  },
   {
     value: 'youtube-marble-long-video',
     label: 'Youtube - Marble Long Video',
@@ -272,15 +284,15 @@ const SCHEDULE_ACTIONS = [
         uploadYoutube: false,
         youtubePrivacy: 'public',
         qualityPreset: '1080p-smooth',
-        qualityLabel: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast',
-        width: 1920,
-        height: 1080,
+        qualityLabel: '720p Smooth · 1280×720 · 60fps · CRF18 · veryfast',
+        width: 1280,
+        height: 720,
         fps: 60,
         crf: 18,
         captureScale: 1,
         videoPreset: 'veryfast',
         headful: true,
-        debugLogs: true,
+        debugLogs: false,
         canvasTransport: 'chunk',
         ttsVoice: 'Alex',
         renderPort: 4300,
@@ -316,57 +328,15 @@ const SCHEDULE_ACTIONS = [
         uploadYoutube: false,
         youtubePrivacy: 'public',
         qualityPreset: '1080p-smooth',
-        qualityLabel: '1080p Smooth · 1080×1920 · 60fps · CRF18 · veryfast',
-        width: 1080,
-        height: 1920,
+        qualityLabel: '720p Smooth · 720×1280 · 60fps · CRF18 · veryfast',
+        width: 720,
+        height: 1280,
         fps: 60,
         crf: 18,
         captureScale: 1,
         videoPreset: 'veryfast',
         headful: true,
-        debugLogs: true,
-        canvasTransport: 'chunk',
-        ttsVoice: 'Alex',
-        renderPort: 4300,
-      },
-    },
-  },
-  {
-    value: 'test-marble-render',
-    label: 'Test - Marble Debug Render',
-    description: 'Run a short non-upload Marble Rush render for scheduled-job debugging.',
-    payload: {
-      game: 'marble-rush',
-      kind: 'youtube-upload',
-      titleHint: 'Test Marble Debug Render',
-      renderOptions: {
-        recordMode: 'continuous',
-        multipleRaceCount: 1,
-        lengthMode: 'target-duration',
-        targetMinutes: 1,
-        targetSeconds: 60,
-        trackLength: 140,
-        density: 'few',
-        obstacleDistribution: 'random',
-        obstacleTypes: ['spinner', 'bumper', 'boost-pad'],
-        format: 'mp4',
-        comparisonWebm: true,
-        videoCapture: 'canvas',
-        videoCanvasLayout: 'horizontal',
-        thumbnail: false,
-        uploadYoutube: false,
-        youtubePrivacy: 'private',
-        qualityPreset: '1080p-smooth',
-        qualityLabel: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast',
-        width: 1920,
-        height: 1080,
-        fps: 60,
-        crf: 18,
-        captureScale: 1,
-        videoPreset: 'veryfast',
-        renderPerformanceProfile: 'turbo60',
-        headful: true,
-        debugLogs: true,
+        debugLogs: false,
         canvasTransport: 'chunk',
         ttsVoice: 'Alex',
         renderPort: 4300,
@@ -767,7 +737,7 @@ function normalizeOptions(input = {}) {
   const qualityPreset = ['1080p-smooth', '1080p', '1440p', '4k'].includes(input.qualityPreset) ? input.qualityPreset : '1080p-smooth';
   const renderPerformanceProfile = input.renderPerformanceProfile === 'turbo60' ? 'turbo60' : 'turbo60';
   const qualitySettings = {
-    '1080p-smooth': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p Smooth · 1920×1080 · 60fps · CRF18 · veryfast' },
+    '1080p-smooth': { width: 1280, height: 720, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '720p Smooth · 1280×720 · 60fps · CRF18 · veryfast' },
     '1080p': { width: 1920, height: 1080, crf: 18, captureScale: 1, fps: 60, videoPreset: 'veryfast', label: '1080p · 60fps · fast encode' },
     '1440p': { width: 2560, height: 1440, crf: 20, captureScale: 1, fps: 60, videoPreset: 'faster', label: 'High 1440p · 60fps · faster encode' },
     '4k': { width: 3840, height: 2160, crf: 20, captureScale: 1, fps: 60, videoPreset: 'faster', label: 'Ultra 4K · 60fps · faster encode' },
@@ -783,7 +753,7 @@ function normalizeOptions(input = {}) {
   const maxRaceSeconds = estimateMaxRaceSecondsForTrackLength(trackLength);
   const videoCanvasLayout = String(input.videoCanvasLayout || 'horizontal').toLowerCase() === 'vertical' ? 'vertical' : 'horizontal';
   const defaultCanvasSize = videoCanvasLayout === 'vertical'
-    ? { width: 1080, height: 1920 }
+    ? { width: 720, height: 1280 }
     : { width: qualitySettings.width, height: qualitySettings.height };
   const width = Math.max(720, Math.min(3840, Math.round(Number(input.width) || defaultCanvasSize.width)));
   const height = Math.max(720, Math.min(3840, Math.round(Number(input.height) || defaultCanvasSize.height)));
@@ -855,7 +825,9 @@ function normalizeOptions(input = {}) {
     estimatedWallClockSeconds,
     qualityPreset,
     renderPerformanceProfile,
-    qualityLabel: qualitySettings.label,
+    qualityLabel: videoCanvasLayout === 'vertical'
+      ? '720p Smooth · 720×1280 · 60fps · CRF18 · veryfast'
+      : qualitySettings.label,
     width,
     height,
     crf,
@@ -1048,6 +1020,99 @@ function listRecordings() {
     .slice(0, 30);
 }
 
+function normalizeHousekeepingOptions(input = {}) {
+  const rawDays = Number(input.retentionDays ?? input.days ?? DEFAULT_RECORDINGS_RETENTION_DAYS);
+  const retentionDays = Number.isFinite(rawDays) ? Math.max(1, Math.min(365, Math.round(rawDays))) : DEFAULT_RECORDINGS_RETENTION_DAYS;
+  const dryRun = input.dryRun === true || input.__dryRun === true;
+  return { retentionDays, dryRun };
+}
+
+function isWithinRecordingsRoot(filePath) {
+  const root = path.resolve(recordingsDir);
+  const full = path.resolve(filePath);
+  return full !== root && full.startsWith(`${root}${path.sep}`);
+}
+
+function collectRecordingPathStats(targetPath) {
+  let files = 0;
+  let dirs = 0;
+  let bytes = 0;
+  const visit = (entryPath) => {
+    const st = statSync(entryPath);
+    if (st.isDirectory()) {
+      dirs += 1;
+      for (const entry of readdirSync(entryPath)) visit(path.join(entryPath, entry));
+      return;
+    }
+    files += 1;
+    bytes += st.size;
+  };
+  visit(targetPath);
+  return { files, dirs, bytes };
+}
+
+function collectRecordingHousekeepingCandidates({ retentionDays } = {}) {
+  if (!existsSync(recordingsDir)) return [];
+  const cutoffMs = Date.now() - (retentionDays * 24 * 60 * 60_000);
+  const candidates = [];
+  for (const entry of readdirSync(recordingsDir, { withFileTypes: true })) {
+    const full = path.join(recordingsDir, entry.name);
+    if (!isWithinRecordingsRoot(full)) continue;
+    const st = statSync(full);
+    const modifiedMs = st.mtimeMs;
+    if (!Number.isFinite(modifiedMs) || modifiedMs >= cutoffMs) continue;
+    const stats = entry.isDirectory()
+      ? collectRecordingPathStats(full)
+      : { files: entry.isFile() ? 1 : 0, dirs: entry.isDirectory() ? 1 : 0, bytes: entry.isFile() ? st.size : 0 };
+    candidates.push({
+      name: entry.name,
+      path: full,
+      type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other',
+      modifiedAt: st.mtime.toISOString(),
+      ageDays: Math.floor((Date.now() - modifiedMs) / (24 * 60 * 60_000)),
+      ...stats,
+    });
+  }
+  return candidates.sort((a, b) => String(a.modifiedAt).localeCompare(String(b.modifiedAt)));
+}
+
+function runRecordingsHousekeeping(input = {}) {
+  const options = normalizeHousekeepingOptions(input);
+  const candidates = collectRecordingHousekeepingCandidates(options);
+  const deleted = [];
+  const errors = [];
+  if (!options.dryRun) {
+    for (const candidate of candidates) {
+      if (!isWithinRecordingsRoot(candidate.path)) {
+        errors.push({ name: candidate.name, error: 'candidate is outside recordings root' });
+        continue;
+      }
+      try {
+        rmSync(candidate.path, { recursive: true, force: true });
+        deleted.push(candidate);
+      } catch (error) {
+        errors.push({ name: candidate.name, path: candidate.path, error: error.message });
+      }
+    }
+  }
+  const selected = options.dryRun ? candidates : deleted;
+  return {
+    ok: errors.length === 0,
+    dryRun: options.dryRun,
+    recordingsDir,
+    retentionDays: options.retentionDays,
+    cutoffAt: new Date(Date.now() - (options.retentionDays * 24 * 60 * 60_000)).toISOString(),
+    candidateCount: candidates.length,
+    deletedCount: deleted.length,
+    fileCount: selected.reduce((sum, item) => sum + (item.files || 0), 0),
+    dirCount: selected.reduce((sum, item) => sum + (item.dirs || 0), 0),
+    bytes: selected.reduce((sum, item) => sum + (item.bytes || 0), 0),
+    candidates: candidates.slice(0, 200).map((item) => ({ ...item, path: recordingDisplayName(item.path) })),
+    deleted: deleted.slice(0, 200).map((item) => ({ ...item, path: recordingDisplayName(item.path) })),
+    errors,
+  };
+}
+
 
 function splitCommand(command) {
   const matches = String(command || '').match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
@@ -1111,8 +1176,8 @@ function generateThumbnailTest(input = {}) {
     '--frame-strategy=mid-highlight',
     `--safe-crop=${options.videoCanvasLayout === 'vertical' ? 'vertical-shorts-clean' : 'composite-no-live-event'}`,
     '--max-words=6',
-    `--width=${options.videoCanvasLayout === 'vertical' ? 1080 : 1280}`,
-    `--height=${options.videoCanvasLayout === 'vertical' ? 1920 : 720}`,
+    `--width=${options.videoCanvasLayout === 'vertical' ? 720 : 1280}`,
+    `--height=${options.videoCanvasLayout === 'vertical' ? 1280 : 720}`,
     `--title=${options.title}`,
     `--youtube-metadata-output=${youtubeMetadataPath}`,
   ];
@@ -1584,6 +1649,7 @@ function publicScheduleRunSummary(run = {}) {
     youtubeMetadataExists: run.youtubeMetadataExists,
     youtubeUploadName: run.youtubeUploadName || null,
     youtubeUploadExists: run.youtubeUploadExists,
+    housekeeping: run.housekeeping || null,
     runKey: run.runKey || null,
     slot,
   };
@@ -2083,6 +2149,17 @@ function executeActionPayload({ actionDefinition, action, title, payloadOverride
   if (!actionDefinition) {
     return { ...baseEntry, status: 'failed', error: `unknown schedule action: ${action}` };
   }
+  if (payload.kind === 'recordings-housekeeping') {
+    const housekeeping = runRecordingsHousekeeping({ ...payload, dryRun });
+    const status = housekeeping.ok ? (dryRun ? 'dry-run' : 'completed') : 'failed';
+    return {
+      ...baseEntry,
+      status,
+      finishedAt: new Date().toISOString(),
+      housekeeping,
+      error: housekeeping.errors?.length ? housekeeping.errors.map((entry) => entry.error).join('; ') : null,
+    };
+  }
   if (payload.kind !== 'youtube-upload') {
     return { ...baseEntry, status: 'failed', error: `unsupported schedule payload kind: ${payload.kind || 'none'}` };
   }
@@ -2116,7 +2193,7 @@ function runScheduleCheck({ dryRun = false, now = new Date() } = {}) {
     }
     const result = executeScheduleAction(item, slot, { dryRun });
     results.push(result);
-    if (!dryRun && ['started', 'skipped', 'failed'].includes(result.status)) {
+    if (!dryRun && ['started', 'skipped', 'failed', 'completed'].includes(result.status)) {
       appendScheduleRun(result);
       state.lastRunByItem[item.id] = runKey;
     }
@@ -2209,10 +2286,18 @@ function getDashboardLaunchAgentStatus() {
   };
 }
 
-function killProcessOnPort(port) {
+function listPidsOnPort(port) {
   try {
     const result = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', timeout: 5000 });
-    const pids = (result.stdout || '').trim().split(/\s+/).filter(Boolean);
+    return (result.stdout || '').trim().split(/\s+/).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function killProcessOnPort(port) {
+  try {
+    const pids = listPidsOnPort(port);
     if (!pids.length) return { port, killed: 0, pids: [] };
     spawnSync('kill', pids, { timeout: 3000 });
     // Wait a tick then force-kill any survivors
@@ -2239,44 +2324,57 @@ function spawnDetached(command, args, options = {}) {
   return child.pid;
 }
 
+function processMatches(pattern) {
+  try {
+    const result = spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8', timeout: 2000 });
+    return (result.stdout || '').trim().split(/\s+/).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function restartRenderStack({ dryRun = false } = {}) {
 
+  const before = {
+    viteDevPids: listPidsOnPort(5174),
+    proxyPortPids: listPidsOnPort(5173),
+    proxyProcessPids: processMatches('marble-https-proxy.js'),
+  };
   const results = {
-    viteDev: { port: 5174, action: 'none' },
-    proxyHttps: { action: 'none' },
+    viteDev: { port: 5174, action: 'none', beforePids: before.viteDevPids },
+    proxyHttps: { port: 5173, action: 'none', beforePids: before.proxyPortPids, beforeProcessPids: before.proxyProcessPids },
   };
 
   if (dryRun) {
-    results.viteDev.action = 'dry-run';
-    results.proxyHttps.action = 'dry-run';
+    results.viteDev.action = before.viteDevPids.length ? 'would-restart' : 'would-start';
+    results.viteDev.command = 'npm run dev:backend';
+    results.proxyHttps.action = before.proxyPortPids.length || before.proxyProcessPids.length ? 'would-restart' : 'would-start';
+    results.proxyHttps.command = 'npm run proxy:https';
     return results;
   }
 
-  // Kill & restart Vite dev server
+  // Kill any existing HTTPS proxy first, before port-based cleanup can hide named process state.
+  if (before.proxyProcessPids.length) {
+    try { spawnSync('pkill', ['-f', 'marble-https-proxy.js'], { encoding: 'utf8', timeout: 3000 }); } catch { /* best effort */ }
+    results.proxyHttps.processKill = { killed: before.proxyProcessPids.length, pids: before.proxyProcessPids };
+  } else {
+    results.proxyHttps.processKill = { killed: 0, pids: [] };
+  }
+  const proxyPortKillResult = killProcessOnPort(5173);
+  results.proxyHttps.portKill = proxyPortKillResult;
+
+  // Kill & restart Vite dev server. If it was not running, still start it so Restart really restores the full 5173 stack.
   const viteKillResult = killProcessOnPort(5174);
   results.viteDev.kill = viteKillResult;
-  if (viteKillResult.killed > 0) {
-    results.viteDev.pid = spawnDetached('npm', ['run', 'dev:backend'], { cwd: rootDir });
-    results.viteDev.action = 'restarted';
-  } else {
-    results.viteDev.action = 'not-running';
-  }
+  results.viteDev.pid = spawnDetached('npm', ['run', 'dev:backend'], { cwd: rootDir });
+  results.viteDev.action = viteKillResult.killed > 0 ? 'restarted' : 'started';
+  results.viteDev.command = 'npm run dev:backend';
 
-  // Check if proxy was running before we killed anything
-  let proxyWasRunning = false;
-  try {
-    const check = spawnSync('pgrep', ['-f', 'marble-https-proxy.js'], { encoding: 'utf8', timeout: 2000 });
-    proxyWasRunning = check.status === 0 && (check.stdout || '').trim().length > 0;
-  } catch { proxyWasRunning = false; }
-
-  // Kill & restart HTTPS proxy
-  if (proxyWasRunning) {
-    try { spawnSync('pkill', ['-f', 'marble-https-proxy.js'], { encoding: 'utf8', timeout: 3000 }); } catch { /* best effort */ }
-    results.proxyHttps.pid = spawnDetached('npm', ['run', 'proxy:https'], { cwd: rootDir });
-    results.proxyHttps.action = 'restarted';
-  } else {
-    results.proxyHttps.action = 'not-running';
-  }
+  // Always start the HTTPS proxy after backend restart/start; marble-dev-stack also reuses it safely if needed.
+  results.proxyHttps.pid = spawnDetached('npm', ['run', 'proxy:https'], { cwd: rootDir });
+  const proxyKilled = (results.proxyHttps.processKill?.killed || 0) + (results.proxyHttps.portKill?.killed || 0);
+  results.proxyHttps.action = proxyKilled > 0 ? 'restarted' : 'started';
+  results.proxyHttps.command = 'npm run proxy:https';
 
   return results;
 }
@@ -2633,7 +2731,7 @@ function dashboardHtml() {
           <div>
             <label for="qualityPreset">畫質</label>
             <select id="qualityPreset" name="qualityPreset">
-              <option value="1080p-smooth" selected>1080p Smooth（1920×1080 / 60fps / CRF18 / veryfast）</option>
+              <option value="1080p-smooth" selected>720p Smooth（1280×720 horizontal / 720×1280 vertical / 60fps / CRF18 / veryfast）</option>
             </select>
           </div>
           <div>
@@ -3135,6 +3233,10 @@ function updateJobActionLogPreview() {
   }
   try {
     const payload = readJobActionPayloadJson();
+    if (payload?.kind === 'recordings-housekeeping') {
+      jobActionLog.textContent = 'Editing JSON · housekeeping retentionDays=' + String(payload.retentionDays || 7);
+      return;
+    }
     const options = payload?.renderOptions || {};
     const mode = normalizeSchedulePayloadRecordMode(options.recordMode);
     jobActionLog.textContent = 'Editing JSON · mode=' + mode + ' · thumbnail=' + String(options.thumbnail) + ' · uploadYoutube=' + String(options.uploadYoutube) + ' · privacy=' + String(options.youtubePrivacy || '(default)');
@@ -3181,6 +3283,12 @@ async function runSelectedJobActionNow() {
     const data = await res.json();
     if (!data.ok) {
       if (jobActionLog) jobActionLog.textContent = data.error || 'Run failed';
+      return;
+    }
+    if (!data.job) {
+      if (jobActionLog) jobActionLog.textContent = 'Action completed\n' + JSON.stringify(data.result, null, 2);
+      await refreshJobs();
+      await refreshRecordings();
       return;
     }
     currentJobId = data.job.id;
@@ -3781,8 +3889,8 @@ async function handleRequest(req, res) {
         { value: 'public', label: 'Public' },
       ],
       videoCanvasLayouts: [
-        { value: 'horizontal', label: 'Horizontal 16:9', default: true, youtubeKind: 'long', width: 1920, height: 1080 },
-        { value: 'vertical', label: 'Vertical 9:16 Shorts', youtubeKind: 'shorts', width: 1080, height: 1920 },
+        { value: 'horizontal', label: 'Horizontal 16:9', default: true, youtubeKind: 'long', width: 1280, height: 720 },
+        { value: 'vertical', label: 'Vertical 9:16 Shorts', youtubeKind: 'shorts', width: 720, height: 1280 },
       ],
       renderPerformanceProfiles: [
         { value: 'turbo60', label: 'Turbo 60（高效能）', default: true },
@@ -3835,7 +3943,12 @@ async function handleRequest(req, res) {
       });
       if (result.status === 'failed') return jsonResponse(res, 400, { ok: false, ...result });
       if (result.status === 'skipped') return jsonResponse(res, 409, { ok: false, ...result });
-      return jsonResponse(res, result.dryRun ? 200 : 202, { ok: true, action, result: { ...result, job: undefined }, job: publicJob(result.job) });
+      return jsonResponse(res, result.dryRun || result.status === 'completed' ? 200 : 202, {
+        ok: true,
+        action,
+        result: { ...result, job: undefined },
+        job: result.job ? publicJob(result.job) : null,
+      });
     } catch (error) {
       return jsonResponse(res, 400, { ok: false, error: error.message });
     }
