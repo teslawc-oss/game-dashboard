@@ -2242,16 +2242,28 @@ function appendGameServerLog(chunk) {
 
 function probeUrl(url, timeoutMs = 900) {
   return new Promise((resolve) => {
-    const client = String(url).startsWith('https:') ? https : http;
-    const req = client.get(url, (res) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const isHttps = String(url).startsWith('https:');
+    const client = isHttps ? https : http;
+    const req = client.get(url, isHttps ? { rejectUnauthorized: false } : undefined, (res) => {
       res.resume();
-      resolve({ online: true, statusCode: res.statusCode });
+      finish({ online: true, statusCode: res.statusCode });
     });
+    const timer = setTimeout(() => {
+      req.destroy();
+      finish({ online: false, statusCode: null });
+    }, timeoutMs);
     req.setTimeout(timeoutMs, () => {
       req.destroy();
-      resolve({ online: false, statusCode: null });
+      finish({ online: false, statusCode: null });
     });
-    req.on('error', () => resolve({ online: false, statusCode: null }));
+    req.on('error', () => finish({ online: false, statusCode: null }));
   });
 }
 
@@ -3286,7 +3298,7 @@ async function runSelectedJobActionNow() {
       return;
     }
     if (!data.job) {
-      if (jobActionLog) jobActionLog.textContent = 'Action completed\n' + JSON.stringify(data.result, null, 2);
+      if (jobActionLog) jobActionLog.textContent = 'Action completed\\n' + JSON.stringify(data.result, null, 2);
       await refreshJobs();
       await refreshRecordings();
       return;

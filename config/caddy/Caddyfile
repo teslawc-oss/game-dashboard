@@ -4,7 +4,7 @@
 	storage file_system /Users/bert/game-dashboard/data/caddy
 }
 
-itdog.mynetgear.com {
+itdog.mynetgear.com, https://itdog.mynetgear.com:8888 {
 	reverse_proxy 127.0.0.1:8889 {
 		header_up Host {host}
 	}
