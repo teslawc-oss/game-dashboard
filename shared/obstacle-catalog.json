@@ -20,8 +20,9 @@
     { "value": "slingshot", "label": "Slingshot", "category": "normal", "tags": [] },
     { "value": "spinnerGate", "label": "Spinner Gate", "category": "normal", "tags": [] },
     { "value": "movingGate", "label": "Moving Gate", "category": "normal", "tags": ["gate", "timing"] },
+    { "value": "splitterFork", "label": "Splitter Fork", "category": "normal", "tags": ["splitter", "lane", "fork"] },
     { "value": "tiltBridge", "label": "Tilt Bridge", "category": "normal", "tags": ["bridge", "timing", "motion"] },
-    { "value": "orbitRing", "label": "Orbit Ring", "category": "normal", "tags": ["arc", "guide", "spectacle"] },
+    { "value": "orbitRing", "label": "Orbit Ring", "category": "buff", "tags": ["arc", "guide", "spectacle", "buff", "boost"] },
     { "value": "dropTarget", "label": "Drop Target", "category": "buff", "tags": ["target", "buff"] }
   ]
 }
